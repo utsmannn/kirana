@@ -1,0 +1,31 @@
+# Core
+fastapi==0.128.0
+uvicorn==0.40.0
+sqlalchemy==2.0.45
+alembic==1.18.1
+pydantic==2.12.5
+pydantic-settings==2.12.0
+
+# Database
+asyncpg==0.31.0
+greenlet==3.3.0
+
+# Cache / Rate Limiting
+redis==7.1.0
+
+# HTTP Client
+httpx==0.28.1
+
+# Background Tasks
+apscheduler==3.11.2
+
+# LLM
+litellm==1.81.0
+openai==2.15.0
+tiktoken==0.12.0
+
+# Utilities
+python-multipart==0.0.21
+python-dotenv==1.2.1
+email-validator==2.3.0
+pytz==2025.2

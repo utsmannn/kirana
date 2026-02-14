@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #09090b; color: #e4e4e7; }
+        .container { display: flex; flex-direction: column; height: 100vh; }
+        .header { display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 1rem; border-bottom: 1px solid #27272a; }
+        .header span { font-size: 0.875rem; font-weight: 500; }
+        .clear-btn { font-size: 0.75rem; color: #71717a; background: none; border: none; cursor: pointer; }
+        .clear-btn:hover { color: #d4d4d8; }
+        .messages { flex: 1; overflow-y: auto; padding: 1rem; }
+        .empty { display: flex; height: 100%; align-items: center; justify-content: center; }
+        .empty p { font-size: 0.875rem; color: #71717a; }
+        .message-list { max-width: 28rem; margin: 0 auto; }
+        .message { margin-bottom: 1rem; display: flex; }
+        .message.user { justify-content: flex-end; }
+        .message-content { max-width: 80%; padding: 0.5rem 1rem; border-radius: 1rem; font-size: 0.875rem; }
+        .message.user .message-content { background: #4f46e5; color: white; }
+        .message.assistant .message-content { background: #27272a; color: #e4e4e7; }
+        .input-area { padding: 0.75rem; border-top: 1px solid #27272a; }
+        .input-wrapper { display: flex; gap: 0.5rem; max-width: 28rem; margin: 0 auto; }
+        .input-wrapper input { flex: 1; padding: 0.5rem 0.75rem; border-radius: 0.5rem; border: 1px solid #3f3f46; background: #18181b; color: #f4f4f5; font-size: 0.875rem; }
+        .input-wrapper input:focus { outline: none; border-color: #4f46e5; }
+        .input-wrapper input:disabled { opacity: 0.5; }
+        .input-wrapper button { padding: 0.5rem 1rem; border-radius: 0.5rem; background: #4f46e5; color: white; border: none; font-size: 0.875rem; font-weight: 500; cursor: pointer; }
+        .input-wrapper button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .error { display: flex; height: 100vh; align-items: center; justify-content: center; color: #f87171; }
+        .loading { display: flex; height: 100vh; align-items: center; justify-content: center; color: #a1a1aa; }
+    </style>
+</head>
+<body>
+    <div id="app" class="loading">Loading...</div>
+
+    <script>
+        // Parse channel ID from URL path: /embed/{channel_id}
+        const pathParts = window.location.pathname.split('/');
+        const channelId = pathParts[2];
+        const token = new URLSearchParams(window.location.search).get('token');
+
+        const API_KEY = 'kirana-default-api-key-change-me';
+        const HISTORY_KEY = `kirana_embed_history_${channelId}`;
+
+        let messages = [];
+        let config = null;
+        let streaming = false;
+
+        async function init() {
+            try {
+                const resp = await fetch(`/v1/channels/${channelId}/embed`, {
+                    headers: { 'Authorization': `Bearer ${API_KEY}` }
+                });
+
+                if (!resp.ok) {
+                    showError('Embed not configured for this channel');
+                    return;
+                }
+
+                config = await resp.json();
+
+                // Load history if enabled
+                if (config.save_history) {
+                    const saved = localStorage.getItem(HISTORY_KEY);
+                    if (saved) {
+                        try { messages = JSON.parse(saved); } catch { messages = []; }
+                    }
+                }
+
+                render();
+            } catch (e) {
+                showError('Failed to load embed configuration');
+            }
+        }
+
+        function saveHistory() {
+            if (config?.save_history && messages.length > 0) {
+                localStorage.setItem(HISTORY_KEY, JSON.stringify(messages));
+            }
+        }
+
+        async function sendMessage(text) {
+            if (!text.trim() || streaming) return;
+
+            messages.push({ role: 'user', content: text.trim() });
+            messages.push({ role: 'assistant', content: '' });
+            saveHistory();
+            render();
+
+            streaming = true;
+            const assistantIdx = messages.length - 1;
+
+            try {
+                const url = token
+                    ? `/v1/chat/completions?embed_token=${token}`
+                    : '/v1/chat/completions';
+
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${API_KEY}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        model: 'default',
+                        messages: messages.slice(0, -1),
+                        stream: true,
+                        channel_id: channelId  // Pass channel to get correct personality
+                    })
+                });
+
+                if (!response.ok) {
+                    const err = await response.json();
+                    throw new Error(err.detail || 'Request failed');
+                }
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            const data = line.slice(6);
+                            if (data === '[DONE]') continue;
+                            try {
+                                const parsed = JSON.parse(data);
+                                const content = parsed.choices?.[0]?.delta?.content;
+                                if (content) {
+                                    messages[assistantIdx].content += content;
+                                    render();
+                                }
+                            } catch { }
+                        }
+                    }
+                }
+                saveHistory();
+            } catch (e) {
+                messages[assistantIdx].content = `Error: ${e.message}`;
+            } finally {
+                streaming = false;
+                render();
+            }
+        }
+
+        function clearHistory() {
+            messages = [];
+            localStorage.removeItem(HISTORY_KEY);
+            render();
+        }
+
+        function showError(msg) {
+            document.getElementById('app').innerHTML = `<div class="error">${msg}</div>`;
+        }
+
+        function render() {
+            const app = document.getElementById('app');
+
+            if (messages.length === 0) {
+                app.innerHTML = `
+                    <div class="container">
+                        <div class="header">
+                            <span>Chat</span>
+                        </div>
+                        <div class="messages">
+                            <div class="empty"><p>Start a conversation</p></div>
+                        </div>
+                        <div class="input-area">
+                            <div class="input-wrapper">
+                                <input type="text" id="msgInput" placeholder="Type a message..." ${streaming ? 'disabled' : ''}>
+                                <button id="sendBtn" ${streaming ? 'disabled' : ''}>Send</button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            } else {
+                const msgsHtml = messages.map(m => `
+                    <div class="message ${m.role}">
+                        <div class="message-content">${escapeHtml(m.content) || (streaming && m.role === 'assistant' ? '...' : '')}</div>
+                    </div>
+                `).join('');
+
+                app.innerHTML = `
+                    <div class="container">
+                        <div class="header">
+                            <span>Chat</span>
+                            <button class="clear-btn" id="clearBtn">Clear</button>
+                        </div>
+                        <div class="messages">
+                            <div class="message-list">${msgsHtml}</div>
+                        </div>
+                        <div class="input-area">
+                            <div class="input-wrapper">
+                                <input type="text" id="msgInput" placeholder="Type a message..." ${streaming ? 'disabled' : ''}>
+                                <button id="sendBtn" ${streaming ? 'disabled' : ''}>Send</button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            // Event listeners
+            const input = document.getElementById('msgInput');
+            const sendBtn = document.getElementById('sendBtn');
+            const clearBtn = document.getElementById('clearBtn');
+
+            if (sendBtn) {
+                sendBtn.onclick = () => {
+                    sendMessage(input.value);
+                    input.value = '';
+                };
+            }
+            if (input) {
+                input.onkeydown = (e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        sendMessage(input.value);
+                        input.value = '';
+                    }
+                };
+            }
+            if (clearBtn) {
+                clearBtn.onclick = clearHistory;
+            }
+
+            // Scroll to bottom
+            const msgsDiv = document.querySelector('.messages');
+            if (msgsDiv) msgsDiv.scrollTop = msgsDiv.scrollHeight;
+            if (input) input.focus();
+        }
+
+        function escapeHtml(text) {
+            if (!text) return '';
+            return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        init();
+    </script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+[tool.ruff]
+select = ["E", "F", "I", "B", "C4", "ARG", "PTH"]
+ignore = []
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.isort]
+known-first-party = ["app"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+exclude = ["alembic"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]

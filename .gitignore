@@ -1,0 +1,52 @@
+# Environment
+.env
+.env.local
+.env.production
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+server.log
+
+# Cache
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Frontend
+web/node_modules/
+web/.svelte-kit/
+web/build/
+
+# Docker volumes
+postgres_data/
+redis_data/
+
+# Database dumps
+*.dump
+*.sql.gz

@@ -1,0 +1,37 @@
+@import 'tailwindcss';
+
+@theme {
+	--font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+	--font-mono: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+html {
+	color-scheme: dark;
+}
+
+body {
+	@apply bg-zinc-950 text-zinc-100 antialiased;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+	width: 6px;
+	height: 6px;
+}
+
+::-webkit-scrollbar-track {
+	@apply bg-zinc-900;
+}
+
+::-webkit-scrollbar-thumb {
+	@apply bg-zinc-700 rounded-full;
+}
+
+::-webkit-scrollbar-thumb:hover {
+	@apply bg-zinc-600;
+}
+
+/* Custom focus ring */
+*:focus-visible {
+	@apply outline-2 outline-offset-2 outline-indigo-500;
+}
