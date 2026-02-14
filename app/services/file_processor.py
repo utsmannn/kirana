@@ -423,6 +423,118 @@ class FileProcessor:
             return "", metadata
 
     @classmethod
+    def _excel_to_images_sync(cls, content: bytes, max_rows_per_sheet: int = 50) -> Tuple[List[Image.Image], dict]:
+        """Synchronous Excel to images conversion (run in thread pool).
+
+        Converts each sheet to an image using matplotlib.
+
+        Args:
+            content: Excel file content as bytes
+            max_rows_per_sheet: Maximum rows to render per sheet
+
+        Returns:
+            Tuple of (list of PIL Images, metadata dict)
+        """
+        import pandas as pd
+        import matplotlib.pyplot as plt
+        import matplotlib
+        matplotlib.use('Agg')  # Non-interactive backend
+
+        metadata = {'sheets': [], 'total_sheets': 0}
+        images = []
+
+        excel_file = pd.ExcelFile(io.BytesIO(content))
+
+        for sheet_name in excel_file.sheet_names:
+            df = pd.read_excel(excel_file, sheet_name=sheet_name)
+
+            if df.empty:
+                continue
+
+            # Limit rows
+            df_display = df.head(max_rows_per_sheet)
+
+            # Create figure
+            fig, ax = plt.subplots(figsize=(12, min(20, 2 + len(df_display) * 0.3)))
+            ax.axis('off')
+
+            # Create table
+            table = ax.table(
+                cellText=df_display.values.tolist(),
+                colLabels=[str(col) for col in df_display.columns],
+                loc='upper center',
+                cellLoc='center'
+            )
+            table.auto_set_font_size(False)
+            table.set_fontsize(8)
+            table.scale(1, 1.5)
+
+            # Add sheet name as title
+            plt.title(f"Sheet: {sheet_name}", fontsize=12, fontweight='bold', pad=20)
+
+            # Convert to image
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', bbox_inches='tight', dpi=100, facecolor='white')
+            buf.seek(0)
+            img = Image.open(buf)
+            images.append(img.copy())
+            buf.close()
+            plt.close(fig)
+
+            metadata['sheets'].append({
+                'name': sheet_name,
+                'rows': len(df),
+                'columns': len(df.columns),
+                'displayed_rows': len(df_display)
+            })
+
+        metadata['total_sheets'] = len(images)
+
+        return images, metadata
+
+    @classmethod
+    async def excel_to_images(cls, content: bytes, max_rows_per_sheet: int = 50, timeout: float = 60.0) -> Tuple[List[Image.Image], dict]:
+        """
+        Convert Excel sheets to images.
+
+        Runs in a thread pool to avoid blocking the async event loop.
+
+        Args:
+            content: Excel file content as bytes
+            max_rows_per_sheet: Maximum rows to render per sheet
+            timeout: Maximum time in seconds for conversion
+
+        Returns:
+            Tuple of (list of PIL Images, metadata dict)
+        """
+        try:
+            logger.info("[FILE_PROCESSOR] Starting Excel to image conversion")
+            loop = asyncio.get_event_loop()
+
+            images, metadata = await asyncio.wait_for(
+                loop.run_in_executor(
+                    _executor,
+                    cls._excel_to_images_sync,
+                    content,
+                    max_rows_per_sheet
+                ),
+                timeout=timeout
+            )
+
+            logger.info("[FILE_PROCESSOR] Converted %d Excel sheets to images", len(images))
+            return images, metadata
+
+        except asyncio.TimeoutError:
+            logger.error("[FILE_PROCESSOR] Excel to image conversion timed out")
+            raise asyncio.TimeoutError("Excel conversion timed out")
+        except ImportError as e:
+            logger.error("[FILE_PROCESSOR] Missing dependency for Excel to image: %s", e)
+            raise ImportError(f"Missing dependency: {e}")
+        except Exception as e:
+            logger.exception("[FILE_PROCESSOR] Excel to image conversion failed: %s", e)
+            raise
+
+    @classmethod
     async def extract_powerpoint_text(cls, content: bytes) -> Tuple[str, dict]:
         """
         Extract text from PowerPoint presentation.

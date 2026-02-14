@@ -438,7 +438,6 @@ Be exhaustive - capture 100% of the text."""
 
     else:
         # ============ DOCUMENT PROCESSING (Word, Excel, PowerPoint, Text) ============
-        # All documents go through: extract text -> AI analysis -> save with raw text
 
         is_word = mime_type in (
             'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -454,38 +453,104 @@ Be exhaustive - capture 100% of the text."""
         )
         is_text = mime_type in ('text/plain', 'text/markdown', 'text/csv')
 
-        # Step 1: Extract text from document
-        logger.info("[UPLOAD] Step 1: Extracting text from %s...", mime_type)
+        # ============ EXCEL: Use Vision API (sheets -> images) ============
+        if is_excel:
+            logger.info("[UPLOAD] Excel detected, converting sheets to images...")
 
-        if is_word:
-            doc_text, doc_metadata = await FileProcessor.extract_word_text(content)
-        elif is_excel:
-            doc_text, doc_metadata = await FileProcessor.extract_excel_text(content)
-        elif is_ppt:
-            doc_text, doc_metadata = await FileProcessor.extract_powerpoint_text(content)
-        elif is_text:
-            doc_text = content.decode('utf-8', errors='ignore')
-            doc_metadata = {'extraction_method': 'direct_decode'}
-        else:
-            # Fallback to generic extract_text
-            doc_text, doc_metadata = await FileProcessor.extract_text(content, mime_type, file.filename)
+            if not is_zai_vision_configured():
+                raise HTTPException(status_code=400, detail="Excel memerlukan Z.AI Vision API. Set ZAI_API_KEY untuk mengaktifkan.")
 
-        metadata.update(doc_metadata)
-
-        # Check if extraction succeeded
-        if doc_text and doc_text.strip():
-            # Save raw text to metadata
-            metadata["raw_text"] = doc_text
-            metadata["raw_text_length"] = len(doc_text)
-
-            # Step 2: Analyze with AI
-            logger.info("[UPLOAD] Step 2: Analyzing document with AI...")
             try:
-                model = settings.DEFAULT_MODEL or "gpt-4o-mini"
+                # Step 1: Convert sheets to images
+                images, img_metadata = await FileProcessor.excel_to_images(content, max_rows_per_sheet=50)
+                metadata.update(img_metadata)
 
-                doc_type_name = "Word" if is_word else "Excel" if is_excel else "PowerPoint" if is_ppt else "text"
+                if not images:
+                    raise HTTPException(status_code=400, detail="Tidak ada data di file Excel")
 
-                analysis_prompt = f"""Analisa dokumen {doc_type_name} berikut dan berikan:
+                logger.info("[UPLOAD] Converted %d sheets to images, sending to Vision API", len(images))
+
+                # Step 2: Analyze with Vision API
+                zai_vision = get_zai_vision_service()
+
+                excel_prompt = f"""Baca dan ekstrak SEMUA data dari spreadsheet Excel ini yang memiliki {len(images)} sheet.
+
+TUGAS UTAMA: Ekstrak data secara LENGKAP dan AKURAT agar bisa di-query tanpa perlu file asli.
+
+Untuk SETIAP sheet, berikan:
+
+## Sheet: [nama sheet]
+
+### Struktur
+- Jumlah kolom: X
+- Nama kolom: [list semua kolom]
+
+### Data Lengkap
+| Kolom1 | Kolom2 | Kolom3 | ... |
+|--------|--------|--------|-----|
+| value1 | value2 | value3 | ... |
+| ...    | ...    | ...    | ... |
+
+### Catatan
+- Total baris: X
+- [info penting lainnya]
+
+PENTING:
+- Transcribe SEMUA nilai yang terlihat dengan akurat
+- Jangan summarize atau skip data apapun
+- Format angka dan tanggal persis seperti di gambar
+- Jika ada cell kosong, tulis "[kosong]" """
+
+                result = await asyncio.wait_for(
+                    zai_vision.analyze_multiple_images(images=images, prompt=excel_prompt),
+                    timeout=120.0
+                )
+
+                if result["success"] and result.get("content"):
+                    extracted_text = result["content"]
+                    metadata["analysis_method"] = "vision_api_excel"
+                    metadata["analysis_success"] = True
+                    logger.info("[UPLOAD] Excel Vision analysis complete: %d chars", len(extracted_text))
+                else:
+                    raise HTTPException(status_code=400, detail=f"Vision API gagal: {result.get('error', 'Unknown error')}")
+
+            except asyncio.TimeoutError:
+                raise HTTPException(status_code=400, detail="Excel analysis timed out")
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.exception("[UPLOAD] Excel processing failed: %s", e)
+                raise HTTPException(status_code=400, detail=f"Gagal memproses Excel: {str(e)}")
+
+        # ============ WORD, PPT, TEXT: Extract text -> AI analysis ============
+        elif is_word or is_ppt or is_text:
+            # Step 1: Extract text from document
+            logger.info("[UPLOAD] Step 1: Extracting text from %s...", mime_type)
+
+            if is_word:
+                doc_text, doc_metadata = await FileProcessor.extract_word_text(content)
+            elif is_ppt:
+                doc_text, doc_metadata = await FileProcessor.extract_powerpoint_text(content)
+            elif is_text:
+                doc_text = content.decode('utf-8', errors='ignore')
+                doc_metadata = {'extraction_method': 'direct_decode'}
+
+            metadata.update(doc_metadata)
+
+            # Check if extraction succeeded
+            if doc_text and doc_text.strip():
+                # Save raw text to metadata
+                metadata["raw_text"] = doc_text
+                metadata["raw_text_length"] = len(doc_text)
+
+                # Step 2: Analyze with AI
+                logger.info("[UPLOAD] Step 2: Analyzing document with AI...")
+                try:
+                    model = settings.DEFAULT_MODEL or "gpt-4o-mini"
+
+                    doc_type_name = "Word" if is_word else "PowerPoint"
+
+                    analysis_prompt = f"""Analisa dokumen {doc_type_name} berikut dan berikan:
 
 1. RINGKASAN singkat (2-3 kalimat)
 2. POIN-POIN PENTING dalam bullet points
@@ -502,26 +567,26 @@ Format output:
 - [poin 2]
 - dst..."""
 
-                completion_kwargs = {
-                    "model": model,
-                    "messages": [{"role": "user", "content": analysis_prompt}],
-                    "temperature": 0.3,
-                    "max_tokens": 2048,
-                    "api_key": settings.OPENAI_API_KEY,
-                    "timeout": 60,
-                    "num_retries": 1,
-                }
+                    completion_kwargs = {
+                        "model": model,
+                        "messages": [{"role": "user", "content": analysis_prompt}],
+                        "temperature": 0.3,
+                        "max_tokens": 2048,
+                        "api_key": settings.OPENAI_API_KEY,
+                        "timeout": 60,
+                        "num_retries": 1,
+                    }
 
-                if settings.OPENAI_BASE_URL:
-                    completion_kwargs["api_base"] = settings.OPENAI_BASE_URL
-                    if "/" not in model:
-                        completion_kwargs["model"] = f"openai/{model}"
+                    if settings.OPENAI_BASE_URL:
+                        completion_kwargs["api_base"] = settings.OPENAI_BASE_URL
+                        if "/" not in model:
+                            completion_kwargs["model"] = f"openai/{model}"
 
-                response = await litellm.acompletion(**completion_kwargs)
-                ai_summary = response.choices[0].message.content or ""
+                    response = await litellm.acompletion(**completion_kwargs)
+                    ai_summary = response.choices[0].message.content or ""
 
-                # Combine: AI summary + raw text
-                extracted_text = f"""{ai_summary}
+                    # Combine: AI summary + raw text
+                    extracted_text = f"""{ai_summary}
 
 ---
 
@@ -529,33 +594,33 @@ Format output:
 
 {doc_text}"""
 
-                metadata["analysis_method"] = "extract_ai_analyze"
-                metadata["analysis_success"] = True
-                metadata["analysis_model"] = model
-                logger.info("[UPLOAD] AI analysis complete: %d chars (summary + raw)", len(extracted_text))
+                    metadata["analysis_method"] = "extract_ai_analyze"
+                    metadata["analysis_success"] = True
+                    metadata["analysis_model"] = model
+                    logger.info("[UPLOAD] AI analysis complete: %d chars (summary + raw)", len(extracted_text))
 
-            except Exception as e:
-                # AI analysis failed, save raw text only
-                logger.warning("[UPLOAD] AI analysis failed, saving raw extracted text: %s", e)
-                extracted_text = doc_text
-                metadata["analysis_method"] = "extract_only"
-                metadata["analysis_success"] = True
-                metadata["ai_analysis_error"] = str(e)
+                except Exception as e:
+                    logger.warning("[UPLOAD] AI analysis failed, saving raw extracted text: %s", e)
+                    extracted_text = doc_text
+                    metadata["analysis_method"] = "extract_only"
+                    metadata["analysis_success"] = True
+                    metadata["ai_analysis_error"] = str(e)
+
+            else:
+                # Extraction returned empty
+                error_msg = doc_metadata.get('error', 'No text content could be extracted')
+                if file_path.exists():
+                    file_path.unlink()
+                if doc_metadata.get('unsupported_format') == 'doc_legacy':
+                    raise HTTPException(status_code=400, detail=error_msg)
+                else:
+                    raise HTTPException(status_code=400, detail=f"Gagal mengekstrak teks: {error_msg}")
 
         else:
-            # Extraction returned empty - don't save, return error to user
-            logger.warning("[UPLOAD] Document text extraction returned empty result")
-            error_msg = doc_metadata.get('error', 'No text content could be extracted')
-
-            # Clean up saved file
+            # Unsupported file type
             if file_path.exists():
                 file_path.unlink()
-
-            # Return specific error message
-            if doc_metadata.get('unsupported_format') == 'doc_legacy':
-                raise HTTPException(status_code=400, detail=error_msg)
-            else:
-                raise HTTPException(status_code=400, detail=f"Gagal mengekstrak teks dari dokumen: {error_msg}")
+            raise HTTPException(status_code=400, detail=f"Unsupported file type: {mime_type}")
 
     metadata['extracted_length'] = len(extracted_text) if extracted_text else 0
 
@@ -567,10 +632,30 @@ Format output:
     # Create knowledge entry
     logger.info("[UPLOAD] Creating knowledge entry in database...")
     logger.info("[UPLOAD] Content length: %d chars", len(extracted_text))
+
+    # Map MIME types to short content_type (max 50 chars in DB)
+    content_type_map = {
+        'application/pdf': 'pdf',
+        'application/msword': 'word',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'word',
+        'application/vnd.ms-excel': 'excel',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'excel',
+        'application/vnd.ms-powerpoint': 'powerpoint',
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'powerpoint',
+        'text/plain': 'text',
+        'text/markdown': 'markdown',
+        'text/csv': 'csv',
+        'image/jpeg': 'jpeg',
+        'image/png': 'png',
+        'image/gif': 'gif',
+        'image/webp': 'webp',
+    }
+    short_content_type = content_type_map.get(mime_type, mime_type.split('/')[-1][:50])
+
     knowledge = Knowledge(
         title=title or file.filename,
         content=extracted_text,
-        content_type=mime_type.split('/')[-1] if '/' in mime_type else mime_type,
+        content_type=short_content_type,
         file_path=str(file_path),
         file_name=file.filename,
         file_size=file_size,
