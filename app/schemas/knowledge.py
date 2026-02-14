@@ -34,6 +34,12 @@ class KnowledgeResponse(BaseModel):
     is_active: bool
     created_at: datetime
 
+    # File metadata (only present for uploaded files)
+    file_name: Optional[str] = None
+    file_size: Optional[int] = None
+    mime_type: Optional[str] = None
+    has_file: bool = Field(default=False, description="True if this knowledge item has an associated file")
+
     model_config = ConfigDict(from_attributes=True)
 
 

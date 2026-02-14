@@ -346,6 +346,11 @@ export interface KnowledgeItem {
 	content_type: string;
 	created_at: string;
 	updated_at: string;
+	// File metadata (for uploaded files)
+	file_name?: string;
+	file_size?: number;
+	mime_type?: string;
+	has_file?: boolean;
 	[key: string]: unknown;
 }
 
@@ -385,6 +390,25 @@ export function updateKnowledge(
 
 export function deleteKnowledge(token: string, id: string): Promise<void> {
 	return request(`/knowledge/${id}`, { method: 'DELETE', token });
+}
+
+export function uploadKnowledgeFile(
+	token: string,
+	file: File,
+	title?: string
+): Promise<KnowledgeItem> {
+	const formData = new FormData();
+	formData.append('file', file);
+	if (title) {
+		formData.append('title', title);
+	}
+
+	return request('/knowledge/upload', {
+		method: 'POST',
+		token,
+		body: formData
+		// Note: Don't set Content-Type header for FormData, browser will set it with boundary
+	});
 }
 
 // ---------- Usage ----------

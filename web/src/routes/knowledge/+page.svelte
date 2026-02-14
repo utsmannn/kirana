@@ -5,6 +5,7 @@
 		createKnowledge,
 		updateKnowledge,
 		deleteKnowledge,
+		uploadKnowledgeFile,
 		ApiError,
 		type KnowledgeItem,
 		type PaginatedResponse
@@ -28,6 +29,19 @@
 	let formContent = $state('');
 	let formContentType = $state('text');
 	let saving = $state(false);
+
+	// File upload state
+	let uploadMode = $state<'text' | 'file'>('text');
+	let selectedFile = $state<File | null>(null);
+	let uploading = $state(false);
+	let uploadProgress = $state(0);
+	let uploadStage = $state<'idle' | 'uploading' | 'analyzing'>('idle');
+	let uploadTimer: ReturnType<typeof setTimeout> | null = null;
+
+	// Image types that require AI analysis
+	const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp'];
+	// Types that require Vision AI analysis (longer processing time)
+	const VISION_TYPES = [...IMAGE_TYPES, 'application/pdf'];
 
 	// Delete confirm
 	let deleteTarget = $state<KnowledgeItem | null>(null);
@@ -84,7 +98,70 @@
 		formTitle = '';
 		formContent = '';
 		formContentType = 'text';
+		uploadMode = 'text';
+		selectedFile = null;
+		uploadProgress = 0;
+		uploadStage = 'idle';
+		if (uploadTimer) {
+			clearTimeout(uploadTimer);
+			uploadTimer = null;
+		}
 		modalOpen = true;
+	}
+
+	function handleFileSelect(e: Event) {
+		const input = e.target as HTMLInputElement;
+		if (input.files && input.files.length > 0) {
+			selectedFile = input.files[0];
+			// Auto-fill title from filename if empty
+			if (!formTitle) {
+				formTitle = selectedFile.name.replace(/\.[^/.]+$/, '');
+			}
+		}
+	}
+
+	async function handleUpload(e: Event) {
+		e.preventDefault();
+		if (!apiKey.value || !selectedFile) return;
+
+		uploading = true;
+		uploadProgress = 0;
+		uploadStage = 'uploading';
+
+		// Check if file requires Vision AI analysis (images + PDFs)
+		const needsVision = VISION_TYPES.includes(selectedFile.type);
+
+		// Start timer to switch to "analyzing" state after 1.5 seconds
+		if (needsVision) {
+			uploadTimer = setTimeout(() => {
+				if (uploading) {
+					uploadStage = 'analyzing';
+				}
+			}, 1500);
+		}
+
+		try {
+			await uploadKnowledgeFile(apiKey.value, selectedFile, formTitle.trim() || undefined);
+			showToast('File uploaded successfully', 'success');
+			modalOpen = false;
+			selectedFile = null;
+			formTitle = '';
+			await loadItems();
+		} catch (err) {
+			if (err instanceof ApiError) {
+				showToast(err.message, 'error');
+			} else {
+				showToast('Failed to upload file', 'error');
+			}
+		} finally {
+			if (uploadTimer) {
+				clearTimeout(uploadTimer);
+				uploadTimer = null;
+			}
+			uploading = false;
+			uploadProgress = 0;
+			uploadStage = 'idle';
+		}
 	}
 
 	function openEdit(item: KnowledgeItem) {
@@ -97,6 +174,13 @@
 
 	async function handleSave(e: Event) {
 		e.preventDefault();
+
+		// If in file upload mode, use handleUpload instead
+		if (uploadMode === 'file' && !editing) {
+			await handleUpload(e);
+			return;
+		}
+
 		if (!apiKey.value || !formTitle.trim() || !formContent.trim()) return;
 
 		saving = true;
@@ -232,17 +316,45 @@
 								>
 									{item.content_type}
 								</span>
+								{#if item.has_file}
+									<span
+										class="shrink-0 rounded bg-indigo-900/50 px-2 py-0.5 text-[10px] font-medium text-indigo-300"
+										title={item.mime_type}
+									>
+										File
+									</span>
+								{/if}
 							</div>
 							<p class="mt-2 line-clamp-2 text-sm text-zinc-400">
 								{item.content}
 							</p>
 							<p class="mt-2 text-xs text-zinc-600">
 								Updated {new Date(item.updated_at).toLocaleDateString()}
+								{#if item.file_size}
+									<span class="ml-2">• {(item.file_size / 1024).toFixed(1)} KB</span>
+								{/if}
 							</p>
 						</div>
 						<div
 							class="flex shrink-0 gap-1 opacity-0 transition-opacity group-hover:opacity-100"
 						>
+							{#if item.has_file}
+								<a
+									href={`/v1/knowledge/${item.id}/download`}
+									download
+									class="rounded-md p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+									aria-label="Download"
+								>
+									<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path
+											stroke-linecap="round"
+											stroke-linejoin="round"
+											stroke-width="2"
+											d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
+										/>
+									</svg>
+								</a>
+							{/if}
 							<button
 								onclick={() => openEdit(item)}
 								class="rounded-md p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
@@ -305,7 +417,7 @@
 </div>
 
 <!-- Create/Edit Modal -->
-<Modal open={modalOpen} title={modalTitle} onClose={() => (modalOpen = false)}>
+<Modal open={modalOpen} title={modalTitle} onClose={() => (modalOpen = false)} closable={!uploading && !saving}>
 	<form onsubmit={handleSave} class="space-y-4">
 		<div>
 			<label for="entry-title" class="block text-sm font-medium text-zinc-300">Title</label>
@@ -319,36 +431,121 @@
 		</div>
 
 		{#if !editing}
-			<div>
-				<label for="content-type" class="block text-sm font-medium text-zinc-300">Content Type</label>
-				<select
-					id="content-type"
-					bind:value={formContentType}
-					class="mt-1.5 block w-full rounded-lg border border-zinc-600 bg-zinc-700 px-3.5 py-2.5 text-sm text-zinc-100 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+			<!-- Mode toggle for new entries -->
+			<div class="flex rounded-lg border border-zinc-600 bg-zinc-800 p-1">
+				<button
+					type="button"
+					onclick={() => (uploadMode = 'text')}
+					class="flex-1 rounded px-3 py-1.5 text-sm font-medium transition-colors {uploadMode === 'text' ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200'}"
 				>
-					<option value="text">Text</option>
-					<option value="markdown">Markdown</option>
-					<option value="faq">FAQ</option>
-					<option value="document">Document</option>
-				</select>
+					Text
+				</button>
+				<button
+					type="button"
+					onclick={() => (uploadMode = 'file')}
+					class="flex-1 rounded px-3 py-1.5 text-sm font-medium transition-colors {uploadMode === 'file' ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200'}"
+				>
+					Upload File
+				</button>
 			</div>
 		{/if}
 
-		<div>
-			<label for="entry-content" class="block text-sm font-medium text-zinc-300">Content</label>
-			<textarea
-				id="entry-content"
-				bind:value={formContent}
-				placeholder="Enter knowledge content..."
-				rows="8"
-				class="mt-1.5 block w-full resize-y rounded-lg border border-zinc-600 bg-zinc-700 px-3.5 py-2.5 text-sm text-zinc-100 placeholder-zinc-400 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-none"
-			></textarea>
-		</div>
+		{#if uploadMode === 'text' || editing}
+			{#if !editing}
+				<div>
+					<label for="content-type" class="block text-sm font-medium text-zinc-300">Content Type</label>
+					<select
+						id="content-type"
+						bind:value={formContentType}
+						class="mt-1.5 block w-full rounded-lg border border-zinc-600 bg-zinc-700 px-3.5 py-2.5 text-sm text-zinc-100 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+					>
+						<option value="text">Text</option>
+						<option value="markdown">Markdown</option>
+						<option value="faq">FAQ</option>
+						<option value="document">Document</option>
+					</select>
+				</div>
+			{/if}
+
+			<div>
+				<label for="entry-content" class="block text-sm font-medium text-zinc-300">Content</label>
+				<textarea
+					id="entry-content"
+					bind:value={formContent}
+					placeholder="Enter knowledge content..."
+					rows="8"
+					class="mt-1.5 block w-full resize-y rounded-lg border border-zinc-600 bg-zinc-700 px-3.5 py-2.5 text-sm text-zinc-100 placeholder-zinc-400 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+				></textarea>
+			</div>
+		{:else}
+			<!-- File upload UI -->
+			<div>
+				<label class="block text-sm font-medium text-zinc-300">File</label>
+				<div class="mt-1.5">
+					{#if selectedFile}
+						<div class="rounded-lg border border-zinc-600 bg-zinc-800 p-4">
+							<div class="flex items-center gap-3">
+								<svg class="h-8 w-8 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+								</svg>
+								<div class="flex-1 min-w-0">
+									<p class="text-sm font-medium text-zinc-200 truncate">{selectedFile.name}</p>
+									<p class="text-xs text-zinc-500">{(selectedFile.size / 1024).toFixed(1)} KB</p>
+								</div>
+								<button
+									type="button"
+									onclick={() => { selectedFile = null; formTitle = ''; }}
+									class="text-zinc-400 hover:text-zinc-200"
+								>
+									<svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+									</svg>
+								</button>
+							</div>
+						</div>
+					{:else}
+						<label class="flex cursor-pointer flex-col items-center rounded-lg border-2 border-dashed border-zinc-600 bg-zinc-800 p-8 hover:border-zinc-500 hover:bg-zinc-700">
+							<svg class="h-10 w-10 text-zinc-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+							</svg>
+							<span class="mt-2 text-sm text-zinc-400">Click to upload or drag and drop</span>
+							<span class="mt-1 text-xs text-zinc-500">PDF, Word, Excel, PowerPoint, Images, Text</span>
+							<input
+								type="file"
+								class="hidden"
+								onchange={handleFileSelect}
+								accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.md,.csv,.jpg,.jpeg,.png,.gif,.webp"
+							/>
+						</label>
+					{/if}
+				</div>
+				{#if uploading}
+					<div class="mt-2">
+						<div class="h-2 rounded bg-zinc-700">
+							<div class="h-2 rounded bg-indigo-500 transition-all" style="width: {uploadProgress}%"></div>
+						</div>
+						<p class="mt-1 text-xs text-zinc-500">
+							{#if uploadStage === 'analyzing'}
+								<span class="flex items-center gap-1.5">
+									<svg class="h-3 w-3 animate-spin" fill="none" viewBox="0 0 24 24">
+										<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+										<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+									</svg>
+									{selectedFile?.type === 'application/pdf' ? 'Analyzing document with AI...' : 'Analyzing image with AI...'}
+								</span>
+							{:else}
+								Uploading...
+							{/if}
+						</p>
+					</div>
+				{/if}
+			</div>
+		{/if}
 
 		<div class="flex justify-end gap-3 pt-2">
 			<Button variant="secondary" onclick={() => (modalOpen = false)}>Cancel</Button>
-			<Button type="submit" loading={saving}>
-				{saving ? 'Saving...' : editing ? 'Update' : 'Create'}
+			<Button type="submit" loading={saving || uploading} disabled={uploadMode === 'file' && !selectedFile}>
+				{saving ? 'Saving...' : uploading ? (uploadStage === 'analyzing' ? 'Analyzing...' : 'Uploading...') : editing ? 'Update' : uploadMode === 'file' ? 'Upload' : 'Create'}
 			</Button>
 		</div>
 	</form>

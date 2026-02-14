@@ -8,6 +8,10 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
+# Ensure uploads directory exists
+UPLOADS_DIR = Path("/app/uploads/knowledge")
+UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
 from app.api.v1.router import api_router
 from app.config import settings
 from app.core.exceptions import (
@@ -164,6 +168,13 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 
 # Rate limiting
 app.add_middleware(RateLimitMiddleware)
+
+# Serve uploaded files (for image analysis)
+app.mount(
+    "/uploads",
+    StaticFiles(directory=str(UPLOADS_DIR.parent), html=False),
+    name="uploads",
+)
 
 # Admin panel (static SvelteKit build with SPA fallback)
 if PANEL_DIR.exists():

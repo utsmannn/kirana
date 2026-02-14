@@ -2,6 +2,7 @@ from typing import Any, Dict, List
 
 from app.tools.base import BaseTool
 from app.tools.datetime_tool import DateTimeTool
+from app.tools.image_analyzer_tool import ImageAnalyzerTool
 from app.tools.knowledge_tool import KnowledgeTool
 
 
@@ -13,6 +14,7 @@ class ToolRegistry:
     def _register_defaults(self):
         self.register(DateTimeTool())
         self.register(KnowledgeTool())
+        self.register(ImageAnalyzerTool())
 
     def register(self, tool: BaseTool):
         self._tools[tool.name] = tool
