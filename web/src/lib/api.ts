@@ -57,10 +57,23 @@ async function request<T>(
 		} catch {
 			body = await response.text();
 		}
-		const message =
-			typeof body === 'object' && body !== null && 'detail' in body
-				? String((body as { detail: string }).detail)
-				: `Request failed with status ${response.status}`;
+
+		// Handle custom error format: {"error": {"message": "..."}}
+		// Or standard format: {"detail": "..."}
+		let message: string;
+		if (typeof body === 'object' && body !== null) {
+			if ('error' in body && typeof (body as { error: unknown }).error === 'object') {
+				const errorObj = (body as { error: { message?: string } }).error;
+				message = errorObj.message || `Request failed with status ${response.status}`;
+			} else if ('detail' in body) {
+				message = String((body as { detail: string }).detail);
+			} else {
+				message = `Request failed with status ${response.status}`;
+			}
+		} else {
+			message = `Request failed with status ${response.status}`;
+		}
+
 		throw new ApiError(response.status, message, body);
 	}
 

@@ -277,72 +277,206 @@ class FileProcessor:
             return "", metadata
 
     @classmethod
-    async def _extract_from_word(cls, content: bytes) -> str:
-        """Extract text from Word document."""
+    async def extract_word_text(cls, content: bytes) -> Tuple[str, dict]:
+        """
+        Extract text from Word document (.docx only).
+
+        Note: .doc (Word 97-2003) format is NOT supported.
+        Users must convert .doc to .docx before uploading.
+
+        Returns:
+            Tuple of (extracted_text, metadata_dict)
+        """
+        logger.info("[FILE_PROCESSOR] Starting Word text extraction")
+        metadata = {
+            'extraction_method': 'python-docx',
+        }
+
         try:
             from docx import Document
 
             doc = Document(io.BytesIO(content))
             text_parts = []
+            paragraphs_count = 0
+            tables_count = len(doc.tables)
 
             for para in doc.paragraphs:
                 if para.text.strip():
                     text_parts.append(para.text)
+                    paragraphs_count += 1
 
             # Also extract from tables
             for table in doc.tables:
+                text_parts.append("\n[Tabel]")
                 for row in table.rows:
                     row_text = ' | '.join(cell.text.strip() for cell in row.cells)
-                    if row_text:
+                    if row_text.strip(' |'):
                         text_parts.append(row_text)
 
-            return '\n\n'.join(text_parts)
+            extracted_text = '\n\n'.join(text_parts)
+            metadata['paragraphs'] = paragraphs_count
+            metadata['tables'] = tables_count
+
+            if not extracted_text.strip():
+                metadata['is_empty'] = True
+                return "", metadata
+
+            logger.info("[FILE_PROCESSOR] Word extraction complete: %d chars, %d paragraphs, %d tables",
+                       len(extracted_text), paragraphs_count, tables_count)
+
+            return extracted_text, metadata
+
         except ImportError:
-            logger.warning("Word processing not installed. Install with: pip install python-docx")
-            return "[Word document - processing not available]"
+            logger.error("[FILE_PROCESSOR] python-docx not installed")
+            metadata['error'] = 'python-docx not installed'
+            return "", metadata
+        except ValueError as e:
+            # Check if it's old .doc format
+            error_str = str(e).lower()
+            if 'not a word file' in error_str or 'content type' in error_str:
+                logger.warning("[FILE_PROCESSOR] File is not a valid .docx (maybe old .doc format?)")
+                metadata['error'] = 'Format .doc (Word 97-2003) tidak didukung. Silakan convert ke .docx (Word 2007+) dan upload ulang.'
+                metadata['unsupported_format'] = 'doc_legacy'
+                return "", metadata
+            logger.exception("[FILE_PROCESSOR] Word extraction failed: %s", e)
+            metadata['error'] = str(e)
+            return "", metadata
+        except Exception as e:
+            logger.exception("[FILE_PROCESSOR] Word extraction failed: %s", e)
+            metadata['error'] = str(e)
+            return "", metadata
 
     @classmethod
-    async def _extract_from_excel(cls, content: bytes) -> str:
-        """Extract text from Excel spreadsheet."""
+    async def extract_excel_text(cls, content: bytes) -> Tuple[str, dict]:
+        """
+        Extract text from Excel spreadsheet as markdown tables.
+
+        Returns:
+            Tuple of (extracted_text, metadata_dict)
+        """
+        logger.info("[FILE_PROCESSOR] Starting Excel text extraction")
+        metadata = {
+            'extraction_method': 'pandas',
+        }
+
         try:
             import pandas as pd
 
-            # Read all sheets
             excel_file = pd.ExcelFile(io.BytesIO(content))
             text_parts = []
+            sheets_info = []
 
             for sheet_name in excel_file.sheet_names:
                 df = pd.read_excel(excel_file, sheet_name=sheet_name)
-                text_parts.append(f"--- Sheet: {sheet_name} ---")
-                text_parts.append(df.to_string(index=False))
-                text_parts.append('')
 
-            return '\n'.join(text_parts)
+                # Skip empty sheets
+                if df.empty:
+                    continue
+
+                text_parts.append(f"## Sheet: {sheet_name}\n")
+
+                # Convert to markdown table
+                if len(df.columns) > 0:
+                    # Header
+                    header = "| " + " | ".join(str(col) for col in df.columns) + " |"
+                    separator = "| " + " | ".join("---" for _ in df.columns) + " |"
+                    text_parts.append(header)
+                    text_parts.append(separator)
+
+                    # Rows (limit to first 100 rows to avoid huge output)
+                    max_rows = 100
+                    for _, row in df.head(max_rows).iterrows():
+                        row_text = "| " + " | ".join(str(val) if pd.notna(val) else "" for val in row) + " |"
+                        text_parts.append(row_text)
+
+                    if len(df) > max_rows:
+                        text_parts.append(f"\n... dan {len(df) - max_rows} baris lainnya")
+
+                text_parts.append('')
+                sheets_info.append({
+                    'name': sheet_name,
+                    'rows': len(df),
+                    'columns': len(df.columns)
+                })
+
+            metadata['sheets'] = sheets_info
+            metadata['total_sheets'] = len(sheets_info)
+
+            extracted_text = '\n'.join(text_parts)
+
+            if not extracted_text.strip():
+                metadata['is_empty'] = True
+                return "", metadata
+
+            logger.info("[FILE_PROCESSOR] Excel extraction complete: %d chars, %d sheets",
+                       len(extracted_text), len(sheets_info))
+
+            return extracted_text, metadata
+
         except ImportError:
-            logger.warning("Excel processing not installed. Install with: pip install pandas openpyxl")
-            return "[Excel spreadsheet - processing not available]"
+            logger.error("[FILE_PROCESSOR] pandas/openpyxl not installed")
+            metadata['error'] = 'pandas/openpyxl not installed'
+            return "", metadata
+        except Exception as e:
+            logger.exception("[FILE_PROCESSOR] Excel extraction failed: %s", e)
+            metadata['error'] = str(e)
+            return "", metadata
 
     @classmethod
-    async def _extract_from_powerpoint(cls, content: bytes) -> str:
-        """Extract text from PowerPoint presentation."""
+    async def extract_powerpoint_text(cls, content: bytes) -> Tuple[str, dict]:
+        """
+        Extract text from PowerPoint presentation.
+
+        Returns:
+            Tuple of (extracted_text, metadata_dict)
+        """
+        logger.info("[FILE_PROCESSOR] Starting PowerPoint text extraction")
+        metadata = {
+            'extraction_method': 'python-pptx',
+        }
+
         try:
             from pptx import Presentation
 
             prs = Presentation(io.BytesIO(content))
             text_parts = []
+            slides_with_content = 0
 
             for slide_num, slide in enumerate(prs.slides, 1):
-                slide_text = [f"--- Slide {slide_num} ---"]
+                slide_text = [f"## Slide {slide_num}"]
+                has_content = False
+
                 for shape in slide.shapes:
                     if hasattr(shape, "text") and shape.text.strip():
                         slide_text.append(shape.text.strip())
-                if len(slide_text) > 1:
-                    text_parts.append('\n'.join(slide_text))
+                        has_content = True
 
-            return '\n\n'.join(text_parts)
+                if has_content:
+                    text_parts.append('\n'.join(slide_text))
+                    slides_with_content += 1
+
+            metadata['total_slides'] = len(prs.slides)
+            metadata['slides_with_content'] = slides_with_content
+
+            extracted_text = '\n\n'.join(text_parts)
+
+            if not extracted_text.strip():
+                metadata['is_empty'] = True
+                return "", metadata
+
+            logger.info("[FILE_PROCESSOR] PowerPoint extraction complete: %d chars, %d slides",
+                       len(extracted_text), slides_with_content)
+
+            return extracted_text, metadata
+
         except ImportError:
-            logger.warning("PowerPoint processing not installed. Install with: pip install python-pptx")
-            return "[PowerPoint presentation - processing not available]"
+            logger.error("[FILE_PROCESSOR] python-pptx not installed")
+            metadata['error'] = 'python-pptx not installed'
+            return "", metadata
+        except Exception as e:
+            logger.exception("[FILE_PROCESSOR] PowerPoint extraction failed: %s", e)
+            metadata['error'] = str(e)
+            return "", metadata
 
     @classmethod
     def is_vision_type(cls, mime_type: str) -> bool:

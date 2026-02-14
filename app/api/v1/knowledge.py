@@ -437,26 +437,125 @@ Be exhaustive - capture 100% of the text."""
         metadata["content_type"] = "pdf" if is_pdf else "image"
 
     else:
-        # Non-image files: use file processor
-        try:
-            logger.info("[UPLOAD] Starting text extraction for MIME type: %s", mime_type)
-            extracted_text, proc_metadata = await FileProcessor.extract_text(
-                content, mime_type, file.filename
-            )
-            metadata.update(proc_metadata)
-            logger.info("[UPLOAD] Text extraction complete. Extracted %d characters", len(extracted_text))
-        except ValueError as e:
-            logger.error("[UPLOAD] Text extraction failed (ValueError): %s", e)
+        # ============ DOCUMENT PROCESSING (Word, Excel, PowerPoint, Text) ============
+        # All documents go through: extract text -> AI analysis -> save with raw text
+
+        is_word = mime_type in (
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'application/msword'
+        )
+        is_excel = mime_type in (
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'application/vnd.ms-excel'
+        )
+        is_ppt = mime_type in (
+            'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            'application/vnd.ms-powerpoint'
+        )
+        is_text = mime_type in ('text/plain', 'text/markdown', 'text/csv')
+
+        # Step 1: Extract text from document
+        logger.info("[UPLOAD] Step 1: Extracting text from %s...", mime_type)
+
+        if is_word:
+            doc_text, doc_metadata = await FileProcessor.extract_word_text(content)
+        elif is_excel:
+            doc_text, doc_metadata = await FileProcessor.extract_excel_text(content)
+        elif is_ppt:
+            doc_text, doc_metadata = await FileProcessor.extract_powerpoint_text(content)
+        elif is_text:
+            doc_text = content.decode('utf-8', errors='ignore')
+            doc_metadata = {'extraction_method': 'direct_decode'}
+        else:
+            # Fallback to generic extract_text
+            doc_text, doc_metadata = await FileProcessor.extract_text(content, mime_type, file.filename)
+
+        metadata.update(doc_metadata)
+
+        # Check if extraction succeeded
+        if doc_text and doc_text.strip():
+            # Save raw text to metadata
+            metadata["raw_text"] = doc_text
+            metadata["raw_text_length"] = len(doc_text)
+
+            # Step 2: Analyze with AI
+            logger.info("[UPLOAD] Step 2: Analyzing document with AI...")
+            try:
+                model = settings.DEFAULT_MODEL or "gpt-4o-mini"
+
+                doc_type_name = "Word" if is_word else "Excel" if is_excel else "PowerPoint" if is_ppt else "text"
+
+                analysis_prompt = f"""Analisa dokumen {doc_type_name} berikut dan berikan:
+
+1. RINGKASAN singkat (2-3 kalimat)
+2. POIN-POIN PENTING dalam bullet points
+
+Dokumen:
+{doc_text}
+
+Format output:
+## Ringkasan
+[ringkasan singkat]
+
+## Poin Penting
+- [poin 1]
+- [poin 2]
+- dst..."""
+
+                completion_kwargs = {
+                    "model": model,
+                    "messages": [{"role": "user", "content": analysis_prompt}],
+                    "temperature": 0.3,
+                    "max_tokens": 2048,
+                    "api_key": settings.OPENAI_API_KEY,
+                    "timeout": 60,
+                    "num_retries": 1,
+                }
+
+                if settings.OPENAI_BASE_URL:
+                    completion_kwargs["api_base"] = settings.OPENAI_BASE_URL
+                    if "/" not in model:
+                        completion_kwargs["model"] = f"openai/{model}"
+
+                response = await litellm.acompletion(**completion_kwargs)
+                ai_summary = response.choices[0].message.content or ""
+
+                # Combine: AI summary + raw text
+                extracted_text = f"""{ai_summary}
+
+---
+
+## Dokumen Asli
+
+{doc_text}"""
+
+                metadata["analysis_method"] = "extract_ai_analyze"
+                metadata["analysis_success"] = True
+                metadata["analysis_model"] = model
+                logger.info("[UPLOAD] AI analysis complete: %d chars (summary + raw)", len(extracted_text))
+
+            except Exception as e:
+                # AI analysis failed, save raw text only
+                logger.warning("[UPLOAD] AI analysis failed, saving raw extracted text: %s", e)
+                extracted_text = doc_text
+                metadata["analysis_method"] = "extract_only"
+                metadata["analysis_success"] = True
+                metadata["ai_analysis_error"] = str(e)
+
+        else:
+            # Extraction returned empty - don't save, return error to user
+            logger.warning("[UPLOAD] Document text extraction returned empty result")
+            error_msg = doc_metadata.get('error', 'No text content could be extracted')
+
             # Clean up saved file
             if file_path.exists():
                 file_path.unlink()
-            raise HTTPException(status_code=400, detail=str(e))
-        except Exception as e:
-            logger.exception("[UPLOAD] Text extraction failed with unexpected error: %s", e)
-            # Clean up saved file
-            if file_path.exists():
-                file_path.unlink()
-            raise HTTPException(status_code=500, detail=f"Failed to process file: {str(e)}")
+
+            # Return specific error message
+            if doc_metadata.get('unsupported_format') == 'doc_legacy':
+                raise HTTPException(status_code=400, detail=error_msg)
+            else:
+                raise HTTPException(status_code=400, detail=f"Gagal mengekstrak teks dari dokumen: {error_msg}")
 
     metadata['extracted_length'] = len(extracted_text) if extracted_text else 0
 
