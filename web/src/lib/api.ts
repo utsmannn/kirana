@@ -521,7 +521,13 @@ export interface Channel {
 export interface EmbedConfig {
 	public: boolean;
 	save_history: boolean;
+	stream_mode: boolean;
 	regenerate_token?: boolean;
+	theme: string;
+	primary_color: string;
+	bg_color?: string;
+	text_color?: string;
+	font_family?: string;
 }
 
 export interface EmbedConfigResponse {
@@ -529,7 +535,13 @@ export interface EmbedConfigResponse {
 	embed_url?: string;
 	public: boolean;
 	save_history: boolean;
+	stream_mode: boolean;
 	has_token: boolean;
+	theme: string;
+	primary_color: string;
+	bg_color?: string;
+	text_color?: string;
+	font_family?: string;
 }
 
 export interface ChannelsResponse {

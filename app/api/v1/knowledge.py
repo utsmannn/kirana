@@ -5,6 +5,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+import litellm
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import desc, func, or_, select
@@ -26,9 +27,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Upload directory for knowledge files
-UPLOAD_DIR = Path("/app/uploads/knowledge")
+# Upload directory for knowledge files (from config, defaults to /app/uploads)
+UPLOAD_DIR = Path(settings.UPLOAD_DIR) / "knowledge"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+logger.info("[KNOWLEDGE] Upload directory: %s", UPLOAD_DIR)
 
 # Supported types for Z.AI Vision analysis (images + PDFs)
 VISION_TYPES = {
@@ -250,95 +252,189 @@ async def upload_knowledge_file(
     is_image = mime_type in SUPPORTED_IMAGE_TYPES
 
     if is_vision_type:
-        logger.info("[UPLOAD] %s detected, analyzing with Z.AI Vision API (GLM-4.6V)...",
+        logger.info("[UPLOAD] %s detected",
                    "PDF" if is_pdf else "Image")
 
-        # Check if Z.AI Vision is configured
-        if is_zai_vision_configured():
-            try:
-                # Get Z.AI Vision service
-                zai_vision = get_zai_vision_service()
+        # ============ PDF PROCESSING WITH FALLBACK ============
+        if is_pdf:
+            # Step 1: Try native text extraction with pypdf (fast)
+            logger.info("[UPLOAD] Step 1: Attempting native PDF text extraction...")
+            pdf_text, pdf_metadata = await FileProcessor.extract_pdf_text(content)
+            metadata.update(pdf_metadata)
 
-                # For PDFs, convert to concatenated image first
-                if is_pdf:
-                    logger.info("[UPLOAD] Converting PDF to image for Vision analysis...")
+            if pdf_text and pdf_text.strip():
+                # SUCCESS: Got text from native extraction
+                logger.info("[UPLOAD] Native extraction successful: %d chars from %d pages",
+                           len(pdf_text), pdf_metadata.get('pages_with_text', 0))
+
+                # Step 2: Analyze extracted text with AI
+                logger.info("[UPLOAD] Step 2: Analyzing extracted text with AI...")
+
+                # Save raw extracted text to metadata
+                metadata["raw_text"] = pdf_text
+                metadata["raw_text_length"] = len(pdf_text)
+
+                try:
+                    # Use litellm same pattern as chat_service
+                    model = settings.DEFAULT_MODEL or "gpt-4o-mini"
+                    analysis_prompt = f"""Analisa dokumen berikut dan berikan:
+
+1. RINGKASAN singkat (2-3 kalimat)
+2. POIN-POIN PENTING dalam bullet points
+
+Dokumen:
+{pdf_text}
+
+Format output:
+## Ringkasan
+[ringkasan singkat]
+
+## Poin Penting
+- [poin 1]
+- [poin 2]
+- dst..."""
+
+                    completion_kwargs = {
+                        "model": model,
+                        "messages": [{"role": "user", "content": analysis_prompt}],
+                        "temperature": 0.3,
+                        "max_tokens": 2048,
+                        "api_key": settings.OPENAI_API_KEY,
+                        "timeout": 60,
+                        "num_retries": 1,
+                    }
+
+                    # Add api_base if configured (same pattern as chat_service)
+                    if settings.OPENAI_BASE_URL:
+                        completion_kwargs["api_base"] = settings.OPENAI_BASE_URL
+                        if "/" not in model:
+                            completion_kwargs["model"] = f"openai/{model}"
+
+                    response = await litellm.acompletion(**completion_kwargs)
+                    ai_summary = response.choices[0].message.content or ""
+
+                    # Combine: AI summary + raw text
+                    extracted_text = f"""{ai_summary}
+
+---
+
+## Dokumen Asli
+
+{pdf_text}"""
+
+                    metadata["analysis_method"] = "native_extract_ai_analyze"
+                    metadata["analysis_success"] = True
+                    metadata["analysis_model"] = model
+                    logger.info("[UPLOAD] AI analysis complete: %d chars (summary + raw)", len(extracted_text))
+
+                except Exception as e:
+                    # AI analysis failed, save raw text only
+                    logger.warning("[UPLOAD] AI analysis failed, saving raw extracted text: %s", e)
+                    extracted_text = pdf_text
+                    metadata["analysis_method"] = "native_extract_only"
+                    metadata["analysis_success"] = True
+                    metadata["ai_analysis_error"] = str(e)
+
+            else:
+                # FAILED: Native extraction empty - likely scanned PDF
+                logger.info("[UPLOAD] Native extraction empty (likely scanned PDF), falling back to Vision API...")
+
+                # Check if Z.AI Vision is configured
+                if not is_zai_vision_configured():
+                    logger.error("[UPLOAD] Z.AI Vision not configured for scanned PDF fallback")
+                    extracted_text = "[PDF Analysis Failed: Document appears to be scanned (no extractable text) and Z.AI Vision is not configured. Set ZAI_API_KEY to enable Vision analysis.]"
+                    metadata["analysis_success"] = False
+                    metadata["analysis_error"] = "scanned_pdf_no_vision"
+                else:
+                    # Step 3: Fallback to Vision API
                     try:
-                        # Convert PDF pages to images
-                        pages = FileProcessor.pdf_to_images(content, dpi=150)
+                        zai_vision = get_zai_vision_service()
+
+                        logger.info("[UPLOAD] Converting PDF to images for Vision analysis...")
+                        pages = await FileProcessor.pdf_to_images(content, dpi=150, timeout=60.0)
                         metadata["pdf_pages"] = len(pages)
+                        logger.info("[UPLOAD] PDF has %d pages, sending to Vision API", len(pages))
 
-                        # Concatenate into one long image
-                        if len(pages) > 1:
-                            concatenated = FileProcessor.concatenate_images_vertically(
-                                pages, max_height=10000, padding=20
-                            )
-                            image_bytes = FileProcessor.image_to_bytes(concatenated)
-                            metadata["pdf_concatenated"] = True
-                        else:
-                            image_bytes = FileProcessor.image_to_bytes(pages[0])
-                            metadata["pdf_concatenated"] = False
+                        # Limit pages to avoid timeout
+                        max_pages = 15
+                        if len(pages) > max_pages:
+                            logger.warning("[UPLOAD] Limiting to first %d pages", max_pages)
+                            pages = pages[:max_pages]
 
-                        logger.info("[UPLOAD] PDF converted to image (%d bytes), sending to Vision...",
-                                   len(image_bytes))
+                        pdf_prompt = f"""This is a {len(pages)}-page scanned PDF document. Extract ALL text content from each page.
 
-                        # Analyze with Vision
+For each page:
+1. Start with "--- Page X ---" header
+2. Transcribe ALL visible text exactly as shown
+3. For tables: recreate them in markdown format
+4. Preserve the reading order
+
+Be exhaustive - capture 100% of the text."""
+
                         result = await asyncio.wait_for(
-                            zai_vision.analyze_image(
-                                image_source=image_bytes,
-                                prompt="Analyze this document image thoroughly. Extract and transcribe ALL text content accurately. Include: 1) Document structure (headers, sections, paragraphs), 2) All visible text, 3) Tables with their data, 4) Any charts or diagrams descriptions, 5) Important numbers, dates, and key information. Be comprehensive and accurate.",
-                            ),
-                            timeout=120.0  # 2 minute timeout for PDFs (larger images)
+                            zai_vision.analyze_multiple_images(images=pages, prompt=pdf_prompt),
+                            timeout=120.0
                         )
 
-                    except ImportError as e:
-                        logger.error("[UPLOAD] PDF conversion failed: %s", e)
+                        if result["success"] and result.get("content"):
+                            extracted_text = result["content"]
+                            metadata["analysis_method"] = "vision_api_multimodal"
+                            metadata["analysis_success"] = True
+                            logger.info("[UPLOAD] Vision API analysis complete: %d chars", len(extracted_text))
+                        else:
+                            extracted_text = f"[PDF Analysis Failed: Vision API returned no content - {result.get('error', 'Unknown error')}]"
+                            metadata["analysis_success"] = False
+                            metadata["analysis_error"] = result.get("error", "no_content")
+
+                    except asyncio.TimeoutError:
+                        logger.error("[UPLOAD] Vision API timed out")
+                        extracted_text = "[PDF Analysis Failed: Vision analysis timed out - PDF may be too large]"
+                        metadata["analysis_success"] = False
+                        metadata["analysis_error"] = "vision_timeout"
+                    except Exception as e:
+                        logger.exception("[UPLOAD] Vision API failed: %s", e)
                         extracted_text = f"[PDF Analysis Failed: {str(e)}]"
                         metadata["analysis_success"] = False
                         metadata["analysis_error"] = str(e)
-                        result = None
 
-                else:
-                    # Direct image analysis
+        # ============ IMAGE PROCESSING ============
+        else:
+            # Direct image analysis
+            if not is_zai_vision_configured():
+                logger.warning("[UPLOAD] Z.AI Vision not configured for image analysis")
+                extracted_text = "[Image uploaded but Z.AI Vision not configured. Set ZAI_API_KEY to enable analysis.]"
+                metadata["analysis_success"] = False
+                metadata["analysis_error"] = "vision_not_configured"
+            else:
+                try:
+                    zai_vision = get_zai_vision_service()
                     result = await asyncio.wait_for(
                         zai_vision.analyze_image(
                             image_source=str(file_path),
                             prompt="Describe this image in detail. Include: 1) Main subjects/objects, 2) Colors and composition, 3) Any text visible in the image, 4) Overall mood/atmosphere, 5) Any other relevant details.",
                         ),
-                        timeout=60.0  # 60 second timeout
+                        timeout=60.0
                     )
 
-                if result:
-                    if result["success"]:
+                    if result["success"] and result.get("content"):
                         extracted_text = result["content"]
-                        metadata["content_type"] = "pdf" if is_pdf else "image"
-                        metadata["analysis_source"] = "zai_vision_api_glm46v"
+                        metadata["analysis_method"] = "vision_api"
                         metadata["analysis_success"] = True
-                        if result.get("usage"):
-                            metadata["token_usage"] = result["usage"]
-                        logger.info("[UPLOAD] Z.AI Vision analysis complete. Result length: %d chars",
-                                   len(extracted_text))
                     else:
-                        logger.warning("[UPLOAD] Z.AI Vision analysis failed: %s", result.get("error"))
-                        extracted_text = f"[{'PDF' if is_pdf else 'Image'} Analysis Failed: {result.get('error', 'Unknown error')}]"
+                        extracted_text = f"[Image Analysis Failed: {result.get('error', 'Unknown error')}]"
                         metadata["analysis_success"] = False
                         metadata["analysis_error"] = result.get("error")
 
-            except asyncio.TimeoutError:
-                logger.error("[UPLOAD] Z.AI Vision analysis timed out")
-                extracted_text = f"[{'PDF' if is_pdf else 'Image'} Analysis Failed: Timeout - analysis took too long]"
-                metadata["analysis_success"] = False
-                metadata["analysis_error"] = "timeout"
+                except asyncio.TimeoutError:
+                    extracted_text = "[Image Analysis Failed: Timeout]"
+                    metadata["analysis_success"] = False
+                    metadata["analysis_error"] = "timeout"
+                except Exception as e:
+                    extracted_text = f"[Image Analysis Failed: {str(e)}]"
+                    metadata["analysis_success"] = False
+                    metadata["analysis_error"] = str(e)
 
-            except Exception as e:
-                logger.exception("[UPLOAD] Z.AI Vision analysis error: %s", e)
-                extracted_text = f"[{'PDF' if is_pdf else 'Image'} Analysis Failed: {str(e)}]"
-                metadata["analysis_success"] = False
-                metadata["analysis_error"] = str(e)
-        else:
-            logger.warning("[UPLOAD] Z.AI Vision not configured (ZAI_API_KEY not set)")
-            extracted_text = f"[{'PDF' if is_pdf else 'Image'} uploaded but Z.AI Vision not configured. Set ZAI_API_KEY to enable analysis.]"
-            metadata["analysis_success"] = False
-            metadata["analysis_error"] = "zai_vision_not_configured"
+        metadata["content_type"] = "pdf" if is_pdf else "image"
 
     else:
         # Non-image files: use file processor
@@ -362,10 +458,16 @@ async def upload_knowledge_file(
                 file_path.unlink()
             raise HTTPException(status_code=500, detail=f"Failed to process file: {str(e)}")
 
-    metadata['extracted_length'] = len(extracted_text)
+    metadata['extracted_length'] = len(extracted_text) if extracted_text else 0
+
+    # Safeguard: ensure extracted_text is never None
+    if extracted_text is None:
+        logger.warning("[UPLOAD] extracted_text was None, defaulting to empty string")
+        extracted_text = ""
 
     # Create knowledge entry
     logger.info("[UPLOAD] Creating knowledge entry in database...")
+    logger.info("[UPLOAD] Content length: %d chars", len(extracted_text))
     knowledge = Knowledge(
         title=title or file.filename,
         content=extracted_text,
@@ -388,10 +490,13 @@ async def upload_knowledge_file(
 @router.get("/{knowledge_id}/download")
 async def download_knowledge_file(
     knowledge_id: uuid.UUID,
-    api_key: str = Depends(deps.verify_api_key),
     db: AsyncSession = Depends(deps.get_db_session),
+    api_key: str = Depends(deps.verify_api_key_optional),
 ):
-    """Download the original file for a knowledge item."""
+    """Download the original file for a knowledge item.
+
+    Supports auth via Authorization header or api_key query parameter.
+    """
     result = await db.execute(
         select(Knowledge).where(Knowledge.id == knowledge_id)
     )

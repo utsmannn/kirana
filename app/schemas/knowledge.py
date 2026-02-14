@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 
 class KnowledgeBase(BaseModel):
@@ -35,10 +35,16 @@ class KnowledgeResponse(BaseModel):
     created_at: datetime
 
     # File metadata (only present for uploaded files)
+    file_path: Optional[str] = None
     file_name: Optional[str] = None
     file_size: Optional[int] = None
     mime_type: Optional[str] = None
-    has_file: bool = Field(default=False, description="True if this knowledge item has an associated file")
+
+    @computed_field
+    @property
+    def has_file(self) -> bool:
+        """Compute has_file based on file_path presence."""
+        return bool(self.file_path)
 
     model_config = ConfigDict(from_attributes=True)
 

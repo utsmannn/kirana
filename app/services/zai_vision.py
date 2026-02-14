@@ -5,7 +5,7 @@ import logging
 import mimetypes
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from openai import AsyncOpenAI
 from PIL import Image
@@ -91,6 +91,16 @@ class ZaiVisionService:
 
         return data_uri, mime_type
 
+    def _encode_pil_image_to_base64(self, image: Image.Image) -> str:
+        """Encode PIL Image to base64 data URI."""
+        buffer = BytesIO()
+        # Convert to RGB if necessary
+        if image.mode in ('RGBA', 'P'):
+            image = image.convert('RGB')
+        image.save(buffer, format='PNG')
+        base64_data = base64.b64encode(buffer.getvalue()).decode("utf-8")
+        return f"data:image/png;base64,{base64_data}"
+
     async def analyze_image(
         self,
         image_source: str | Path | bytes,
@@ -139,15 +149,18 @@ class ZaiVisionService:
                         ],
                     }
                 ],
-                max_tokens=2000,
+                # No max_tokens limit - let API use model's maximum
             )
 
-            # Extract response
+            # Extract response - ensure content is never None
             content = response.choices[0].message.content if response.choices else ""
+            if content is None:
+                content = ""
+                logger.warning("[ZAI_VISION] API returned None content, defaulting to empty string")
             usage = response.usage
 
             logger.info("[ZAI_VISION] API success: content_length=%d, tokens_used=%s",
-                       len(content) if content else 0,
+                       len(content),
                        f"{usage.prompt_tokens}/{usage.completion_tokens}" if usage else "N/A")
 
             return {
@@ -185,31 +198,162 @@ class ZaiVisionService:
                 "error": f"API error: {str(e)}",
             }
 
+    async def analyze_multiple_images(
+        self,
+        images: List[Union[str, Path, bytes, Image.Image]],
+        prompt: str,
+    ) -> Dict[str, Any]:
+        """
+        Analyze multiple images in a single multimodal request.
+
+        This is efficient for multi-page PDFs where each page is an image.
+        All images are sent together with the prompt.
+
+        Args:
+            images: List of image sources (file paths, bytes, or PIL Images)
+            prompt: The analysis prompt/question
+
+        Returns:
+            Dict with 'success', 'content', 'error' keys
+        """
+        try:
+            if not images:
+                return {
+                    "success": False,
+                    "content": None,
+                    "error": "No images provided",
+                }
+
+            logger.info("[ZAI_VISION] Encoding %d images for multimodal request", len(images))
+
+            # Build content array with all images followed by text prompt
+            content: List[Dict[str, Any]] = []
+
+            for i, img_source in enumerate(images):
+                try:
+                    if isinstance(img_source, Image.Image):
+                        # PIL Image directly
+                        data_uri = self._encode_pil_image_to_base64(img_source)
+                    else:
+                        # File path or bytes
+                        data_uri, _ = self._encode_image_to_base64(img_source)
+
+                    content.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": data_uri,
+                        },
+                    })
+                    logger.debug("[ZAI_VISION] Encoded image %d/%d (data_uri_length=%d)",
+                               i + 1, len(images), len(data_uri))
+                except Exception as e:
+                    logger.warning("[ZAI_VISION] Failed to encode image %d: %s", i + 1, e)
+                    continue
+
+            if not content:
+                return {
+                    "success": False,
+                    "content": None,
+                    "error": "Failed to encode any images",
+                }
+
+            # Add the text prompt at the end
+            content.append({
+                "type": "text",
+                "text": prompt,
+            })
+
+            logger.info("[ZAI_VISION] Calling multimodal API: model=%s, images=%d, prompt_length=%d",
+                       self._model, len(content) - 1, len(prompt))
+
+            client = self._get_client()
+
+            # Call Z.AI Vision API with multiple images
+            response = await client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": content,
+                    }
+                ],
+                extra_body={
+                    "thinking": {
+                        "type": "enabled"
+                    }
+                }
+            )
+
+            # Extract response - ensure content is never None
+            response_content = response.choices[0].message.content if response.choices else ""
+            if response_content is None:
+                response_content = ""
+                logger.warning("[ZAI_VISION] API returned None content, defaulting to empty string")
+            usage = response.usage
+
+            logger.info("[ZAI_VISION] Multimodal API success: content_length=%d, tokens_used=%s",
+                       len(response_content),
+                       f"{usage.prompt_tokens}/{usage.completion_tokens}" if usage else "N/A")
+
+            return {
+                "success": True,
+                "content": response_content,
+                "error": None,
+                "usage": {
+                    "prompt_tokens": usage.prompt_tokens if usage else 0,
+                    "completion_tokens": usage.completion_tokens if usage else 0,
+                    "total_tokens": usage.total_tokens if usage else 0,
+                } if usage else None,
+            }
+
+        except ValueError as e:
+            logger.error("[ZAI_VISION] Configuration error: %s", e)
+            return {
+                "success": False,
+                "content": None,
+                "error": f"Configuration error: {str(e)}",
+            }
+
+        except Exception as e:
+            logger.exception("[ZAI_VISION] Multimodal API error: %s", e)
+            return {
+                "success": False,
+                "content": None,
+                "error": f"API error: {str(e)}",
+            }
+
 
 # Global singleton instance
 _zai_vision_service: Optional[ZaiVisionService] = None
+_zai_vision_api_key: Optional[str] = None
 
 
 def get_zai_vision_service() -> ZaiVisionService:
-    """Get or create Z.AI Vision service instance."""
-    global _zai_vision_service
+    """Get or create Z.AI Vision service instance.
 
-    if _zai_vision_service is None:
-        import os
+    Will reinitialize if API key changes.
+    """
+    global _zai_vision_service, _zai_vision_api_key
 
-        # Support both ZAI_API_KEY and Z_AI_API_KEY for flexibility
-        api_key = os.getenv("ZAI_API_KEY") or os.getenv("Z_AI_API_KEY")
+    import os
+
+    # Support both ZAI_API_KEY and Z_AI_API_KEY for flexibility
+    current_api_key = os.getenv("ZAI_API_KEY") or os.getenv("Z_AI_API_KEY")
+
+    # Reinitialize if API key changed or service not created
+    if _zai_vision_service is None or _zai_vision_api_key != current_api_key:
         base_url = os.getenv("ZAI_VISION_BASE_URL", ZAI_VISION_BASE_URL)
         model = os.getenv("ZAI_VISION_MODEL", ZAI_VISION_MODEL)
 
         _zai_vision_service = ZaiVisionService(
-            api_key=api_key,
+            api_key=current_api_key,
             base_url=base_url,
             model=model,
         )
+        _zai_vision_api_key = current_api_key
 
-        if api_key:
-            logger.info("[ZAI_VISION] Service initialized with API key (len=%d)", len(api_key))
+        if current_api_key:
+            logger.info("[ZAI_VISION] Service initialized with API key (len=%d)", len(current_api_key))
         else:
             logger.warning("[ZAI_VISION] No API key configured. Image analysis will not work.")
 

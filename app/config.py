@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     # API Authentication (single-tenant mode)
     KIRANA_API_KEY: str = "kirana-default-api-key-change-me"
 
+    # Upload directory for knowledge files
+    UPLOAD_DIR: str = "/app/uploads"
+
     # Logging
     LOG_LEVEL: str = "INFO"
 

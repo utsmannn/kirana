@@ -62,7 +62,14 @@ class ChannelResponse(BaseModel):
 class EmbedConfigUpdate(BaseModel):
     public: bool = Field(default=True, description="If true, no token required")
     save_history: bool = Field(default=True, description="Save chat history to localStorage")
+    stream_mode: bool = Field(default=True, description="If true, stream responses; if false, wait for complete response")
     regenerate_token: bool = Field(default=False, description="Generate new embed token")
+    # Theme settings
+    theme: str = Field(default="dark", description="Theme preset: 'light' or 'dark'")
+    primary_color: str = Field(default="#6366f1", description="Primary color (hex)")
+    bg_color: Optional[str] = Field(default=None, description="Background color (hex, optional)")
+    text_color: Optional[str] = Field(default=None, description="Text color (hex, optional)")
+    font_family: Optional[str] = Field(default=None, description="Font family (optional)")
 
 
 class EmbedConfigResponse(BaseModel):
@@ -70,7 +77,14 @@ class EmbedConfigResponse(BaseModel):
     embed_url: Optional[str] = None
     public: bool
     save_history: bool
+    stream_mode: bool
     has_token: bool
+    # Theme settings
+    theme: str = "dark"
+    primary_color: str = "#6366f1"
+    bg_color: Optional[str] = None
+    text_color: Optional[str] = None
+    font_family: Optional[str] = None
 
 
 class ChannelListResponse(BaseModel):
@@ -273,6 +287,16 @@ async def configure_embed(
     # Update config
     config["public"] = data.public
     config["save_history"] = data.save_history
+    config["stream_mode"] = data.stream_mode
+    # Theme settings
+    config["theme"] = data.theme
+    config["primary_color"] = data.primary_color
+    if data.bg_color:
+        config["bg_color"] = data.bg_color
+    if data.text_color:
+        config["text_color"] = data.text_color
+    if data.font_family:
+        config["font_family"] = data.font_family
     channel.embed_config = config
     channel.embed_enabled = True
 
@@ -282,17 +306,38 @@ async def configure_embed(
     await db.commit()
     await db.refresh(channel)
 
-    # Build embed URL
+    # Build embed URL with theme params
     embed_url = f"/embed/{channel.id}"
+    params = []
     if not data.public:
-        embed_url += f"?token={channel.embed_token}"
+        params.append(f"token={channel.embed_token}")
+    # Add theme params
+    if data.theme and data.theme != "dark":
+        params.append(f"theme={data.theme}")
+    if data.primary_color and data.primary_color != "#6366f1":
+        params.append(f"primaryColor={data.primary_color.replace('#', '%23')}")
+    if data.bg_color:
+        params.append(f"bgColor={data.bg_color.replace('#', '%23')}")
+    if data.text_color:
+        params.append(f"textColor={data.text_color.replace('#', '%23')}")
+    if data.font_family:
+        params.append(f"font={data.font_family.replace(' ', '+')}")
+
+    if params:
+        embed_url += "?" + "&".join(params)
 
     return EmbedConfigResponse(
         embed_enabled=True,
         embed_url=embed_url,
         public=data.public,
         save_history=data.save_history,
+        stream_mode=data.stream_mode,
         has_token=bool(channel.embed_token),
+        theme=data.theme,
+        primary_color=data.primary_color,
+        bg_color=data.bg_color,
+        text_color=data.text_color,
+        font_family=data.font_family,
     )
 
 
@@ -315,15 +360,42 @@ async def get_embed_config(
 
     if channel.embed_enabled:
         embed_url = f"/embed/{channel.id}"
+        params = []
         if not config.get("public", True):
-            embed_url += f"?token={channel.embed_token}"
+            params.append(f"token={channel.embed_token}")
+        # Add theme params
+        theme = config.get("theme", "dark")
+        primary_color = config.get("primary_color", "#6366f1")
+        bg_color = config.get("bg_color")
+        text_color = config.get("text_color")
+        font_family = config.get("font_family")
+
+        if theme and theme != "dark":
+            params.append(f"theme={theme}")
+        if primary_color and primary_color != "#6366f1":
+            params.append(f"primaryColor={primary_color.replace('#', '%23')}")
+        if bg_color:
+            params.append(f"bgColor={bg_color.replace('#', '%23')}")
+        if text_color:
+            params.append(f"textColor={text_color.replace('#', '%23')}")
+        if font_family:
+            params.append(f"font={font_family.replace(' ', '+')}")
+
+        if params:
+            embed_url += "?" + "&".join(params)
 
     return EmbedConfigResponse(
         embed_enabled=channel.embed_enabled,
         embed_url=embed_url,
         public=config.get("public", True),
         save_history=config.get("save_history", True),
+        stream_mode=config.get("stream_mode", True),
         has_token=bool(channel.embed_token),
+        theme=config.get("theme", "dark"),
+        primary_color=config.get("primary_color", "#6366f1"),
+        bg_color=config.get("bg_color"),
+        text_color=config.get("text_color"),
+        font_family=config.get("font_family"),
     )
 
 

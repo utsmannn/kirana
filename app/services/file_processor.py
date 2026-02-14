@@ -1,14 +1,85 @@
 """File processing service for extracting text from various document formats."""
 
+import asyncio
 import io
 import logging
+import shutil
+import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+# Thread pool for CPU-intensive operations
+_executor = ThreadPoolExecutor(max_workers=2)
+
+# Cache for poppler path
+_poppler_path: Optional[str] = None
+
+
+def _find_poppler_path() -> Optional[str]:
+    """Find poppler binaries path (pdftoppm)."""
+    # Common locations
+    possible_paths = [
+        "/usr/bin",  # Linux standard
+        "/usr/local/bin",  # macOS homebrew
+        "/opt/homebrew/bin",  # macOS Apple Silicon
+    ]
+
+    for path in possible_paths:
+        pdftoppm = Path(path) / "pdftoppm"
+        if pdftoppm.exists():
+            logger.info("[FILE_PROCESSOR] Found poppler at: %s", path)
+            return path
+
+    # Try to find via which/where
+    result = shutil.which("pdftoppm")
+    if result:
+        path = str(Path(result).parent)
+        logger.info("[FILE_PROCESSOR] Found poppler via which: %s", path)
+        return path
+
+    logger.warning("[FILE_PROCESSOR] poppler (pdftoppm) not found in common paths")
+    return None
+
+
+def get_poppler_path() -> Optional[str]:
+    """Get cached poppler path."""
+    global _poppler_path
+    if _poppler_path is None:
+        _poppler_path = _find_poppler_path()
+    return _poppler_path
+
+
+def verify_poppler_installed() -> bool:
+    """Verify that poppler is installed and working."""
+    path = get_poppler_path()
+    if not path:
+        return False
+
+    pdftoppm = Path(path) / "pdftoppm"
+    if not pdftoppm.exists():
+        return False
+
+    try:
+        result = subprocess.run(
+            [str(pdftoppm), "-v"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            version = result.stderr.strip() or result.stdout.strip()
+            logger.info("[FILE_PROCESSOR] Poppler verified: %s", version.split('\n')[0])
+            return True
+    except Exception as e:
+        logger.warning("[FILE_PROCESSOR] Poppler verification failed: %s", e)
+
+    return False
 
 
 class FileProcessor:
@@ -129,13 +200,81 @@ class FileProcessor:
 
     @classmethod
     async def _extract_from_pdf(cls, content: bytes) -> str:
-        """PDF processing is handled by Z.AI Vision in knowledge.py.
+        """Extract text from PDF using pypdf (native text extraction).
 
-        This method is kept for backwards compatibility but should not be called
-        for new uploads. PDFs are converted to images and analyzed with Vision AI.
+        This is the primary method for PDF text extraction - fast and reliable
+        for PDFs with embedded text. Falls back to Vision API in knowledge.py
+        for scanned PDFs.
         """
-        logger.info("[FILE_PROCESSOR] PDF should be processed by Z.AI Vision, not text extraction")
-        return "[PDF document - Will be analyzed with Z.AI Vision for better accuracy]"
+        return await cls.extract_pdf_text(content)
+
+    @classmethod
+    async def extract_pdf_text(cls, content: bytes) -> Tuple[str, dict]:
+        """
+        Extract text from PDF using pypdf (native text extraction).
+
+        This is fast and reliable for PDFs with embedded text.
+        For scanned PDFs, the caller should use Vision API as fallback.
+
+        Args:
+            content: PDF file content as bytes
+
+        Returns:
+            Tuple of (extracted_text, metadata_dict)
+        """
+        logger.info("[FILE_PROCESSOR] Starting PDF text extraction with pypdf")
+        metadata = {
+            'extraction_method': 'pypdf',
+            'pages_processed': 0,
+            'pages_with_text': 0,
+        }
+
+        try:
+            from pypdf import PdfReader
+
+            reader = PdfReader(io.BytesIO(content))
+            total_pages = len(reader.pages)
+            metadata['total_pages'] = total_pages
+
+            logger.info("[FILE_PROCESSOR] PDF has %d pages", total_pages)
+
+            text_parts = []
+            pages_with_text = 0
+
+            for i, page in enumerate(reader.pages):
+                try:
+                    page_text = page.extract_text()
+                    if page_text and page_text.strip():
+                        text_parts.append(f"--- Page {i + 1} ---")
+                        text_parts.append(page_text.strip())
+                        pages_with_text += 1
+                except Exception as e:
+                    logger.warning("[FILE_PROCESSOR] Failed to extract text from page %d: %s", i + 1, e)
+
+            metadata['pages_processed'] = total_pages
+            metadata['pages_with_text'] = pages_with_text
+
+            extracted_text = '\n\n'.join(text_parts)
+
+            # Check if we got meaningful text
+            if not extracted_text.strip() or pages_with_text == 0:
+                logger.warning("[FILE_PROCESSOR] PDF text extraction returned empty result - likely scanned PDF")
+                metadata['is_scanned'] = True
+                return "", metadata
+
+            logger.info("[FILE_PROCESSOR] PDF text extraction complete: %d chars from %d/%d pages",
+                       len(extracted_text), pages_with_text, total_pages)
+
+            return extracted_text, metadata
+
+        except ImportError:
+            logger.error("[FILE_PROCESSOR] pypdf not installed. Install with: pip install pypdf")
+            metadata['error'] = 'pypdf not installed'
+            return "", metadata
+        except Exception as e:
+            logger.exception("[FILE_PROCESSOR] PDF text extraction failed: %s", e)
+            metadata['error'] = str(e)
+            return "", metadata
 
     @classmethod
     async def _extract_from_word(cls, content: bytes) -> str:
@@ -211,28 +350,121 @@ class FileProcessor:
         return mime_type in cls.VISION_TYPES
 
     @classmethod
-    def pdf_to_images(cls, content: bytes, dpi: int = 150) -> List[Image.Image]:
+    def _pdf_to_images_sync(cls, content: bytes, dpi: int, poppler_path: Optional[str] = None) -> List[Image.Image]:
+        """Synchronous PDF to image conversion (run in thread pool).
+
+        Args:
+            content: PDF bytes
+            dpi: Resolution for rendering
+            poppler_path: Path to poppler binaries (optional)
+
+        Returns:
+            List of PIL Images
+        """
+        logger.info("[FILE_PROCESSOR_SYNC] Starting PDF conversion (dpi=%d, size=%d bytes)", dpi, len(content))
+
+        try:
+            from pdf2image import convert_from_bytes
+
+            # Build kwargs for convert_from_bytes
+            kwargs = {
+                "dpi": dpi,
+                "fmt": "png",
+                "thread_count": 2,  # Use 2 threads for faster conversion
+            }
+
+            # Add poppler path if available
+            if poppler_path:
+                kwargs["poppler_path"] = poppler_path
+                logger.info("[FILE_PROCESSOR_SYNC] Using poppler path: %s", poppler_path)
+            else:
+                logger.warning("[FILE_PROCESSOR_SYNC] No poppler path specified, using system PATH")
+
+            logger.info("[FILE_PROCESSOR_SYNC] Calling convert_from_bytes...")
+            images = convert_from_bytes(content, **kwargs)
+            logger.info("[FILE_PROCESSOR_SYNC] Conversion successful, got %d pages", len(images))
+
+            return images
+
+        except ImportError as e:
+            logger.error("[FILE_PROCESSOR_SYNC] pdf2image not installed: %s", e)
+            raise
+        except Exception as e:
+            logger.exception("[FILE_PROCESSOR_SYNC] PDF conversion failed: %s", e)
+            raise
+
+    @classmethod
+    async def pdf_to_images(cls, content: bytes, dpi: int = 150, max_pages: int = 20, timeout: float = 120.0) -> List[Image.Image]:
         """
         Convert PDF pages to a list of PIL Images.
+
+        Runs in a thread pool to avoid blocking the async event loop.
+        Includes timeout to prevent indefinite hanging.
 
         Args:
             content: PDF file content as bytes
             dpi: Resolution for rendering (higher = better quality but larger)
+            max_pages: Maximum pages to convert (to prevent memory issues)
+            timeout: Maximum time in seconds for conversion (default 120s)
 
         Returns:
-            List of PIL Image objects, one per page
-        """
-        try:
-            from pdf2image import convert_from_bytes
+            List of PIL Image objects, one per page (up to max_pages)
 
-            logger.info("[FILE_PROCESSOR] Converting PDF to images at %d DPI", dpi)
-            images = convert_from_bytes(content, dpi=dpi)
-            logger.info("[FILE_PROCESSOR] Converted %d pages", len(images))
+        Raises:
+            asyncio.TimeoutError: If conversion exceeds timeout
+            ImportError: If pdf2image is not installed
+            RuntimeError: If poppler is not installed or not working
+        """
+        # Verify poppler is installed first
+        if not verify_poppler_installed():
+            logger.error("[FILE_PROCESSOR] Poppler not installed or not working!")
+            raise RuntimeError(
+                "Poppler (pdftoppm) is not installed or not working. "
+                "Install with: apt-get install poppler-utils (Linux) "
+                "or brew install poppler (macOS)"
+            )
+
+        poppler_path = get_poppler_path()
+        logger.info("[FILE_PROCESSOR] Starting PDF to image conversion at %d DPI (max %d pages, timeout %.1fs)",
+                   dpi, max_pages, timeout)
+        logger.info("[FILE_PROCESSOR] PDF content size: %d bytes (%.2f MB)", len(content), len(content) / (1024 * 1024))
+
+        try:
+            loop = asyncio.get_event_loop()
+
+            # Run with timeout to prevent hanging
+            logger.info("[FILE_PROCESSOR] Submitting to thread pool executor...")
+            try:
+                images = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        _executor,
+                        cls._pdf_to_images_sync,
+                        content,
+                        dpi,
+                        poppler_path
+                    ),
+                    timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                logger.error("[FILE_PROCESSOR] PDF conversion timed out after %.1fs", timeout)
+                raise asyncio.TimeoutError(f"PDF conversion timed out after {timeout} seconds")
+
+            logger.info("[FILE_PROCESSOR] Thread pool returned %d images", len(images))
+
+            # Limit pages to prevent memory issues
+            if len(images) > max_pages:
+                logger.warning("[FILE_PROCESSOR] PDF has %d pages, limiting to %d",
+                             len(images), max_pages)
+                images = images[:max_pages]
+
+            logger.info("[FILE_PROCESSOR] Successfully converted %d pages", len(images))
             return images
 
         except ImportError:
             logger.error("[FILE_PROCESSOR] pdf2image not installed. Install with: pip install pdf2image")
             raise ImportError("pdf2image not installed. Install with: pip install pdf2image")
+        except asyncio.TimeoutError:
+            raise
         except Exception as e:
             logger.exception("[FILE_PROCESSOR] Failed to convert PDF to images: %s", e)
             raise

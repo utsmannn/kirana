@@ -123,6 +123,17 @@ async def seed_default_data():
 async def lifespan(app: FastAPI):
     logger.info("Starting %s (env=%s)", settings.APP_NAME, settings.APP_ENV)
 
+    # Verify poppler installation for PDF processing
+    try:
+        from app.services.file_processor import verify_poppler_installed, get_poppler_path
+        if verify_poppler_installed():
+            logger.info("[STARTUP] Poppler (PDF tools) verified at: %s", get_poppler_path())
+        else:
+            logger.warning("[STARTUP] Poppler not installed. PDF processing will not work!")
+            logger.warning("[STARTUP] Install with: apt-get install poppler-utils (Linux) or brew install poppler (macOS)")
+    except Exception as e:
+        logger.warning("[STARTUP] Could not verify poppler: %s", e)
+
     # Run database migrations
     try:
         run_migrations()

@@ -53,7 +53,13 @@
 	let embedForm = $state({
 		public: true,
 		save_history: true,
-		regenerate_token: false
+		stream_mode: true,
+		regenerate_token: false,
+		theme: 'dark',
+		primary_color: '#6366f1',
+		bg_color: '',
+		text_color: '',
+		font_family: ''
 	});
 
 	onMount(async () => {
@@ -175,12 +181,28 @@
 			embedForm = {
 				public: embedConfig.public,
 				save_history: embedConfig.save_history,
-				regenerate_token: false
+				stream_mode: embedConfig.stream_mode,
+				regenerate_token: false,
+				theme: embedConfig.theme || 'dark',
+				primary_color: embedConfig.primary_color || '#6366f1',
+				bg_color: embedConfig.bg_color || '',
+				text_color: embedConfig.text_color || '',
+				font_family: embedConfig.font_family || ''
 			};
 		} catch (err) {
 			// If no embed config exists, use defaults
 			embedConfig = null;
-			embedForm = { public: true, save_history: true, regenerate_token: false };
+			embedForm = {
+				public: true,
+				save_history: true,
+				stream_mode: true,
+				regenerate_token: false,
+				theme: 'dark',
+				primary_color: '#6366f1',
+				bg_color: '',
+				text_color: '',
+				font_family: ''
+			};
 		} finally {
 			embedLoading = false;
 		}
@@ -539,6 +561,111 @@
 						Chat history is not persisted (starts fresh on each visit)
 					{/if}
 				</p>
+			</div>
+
+			<div>
+				<label class="flex items-center gap-3">
+					<input
+						type="checkbox"
+						bind:checked={embedForm.stream_mode}
+						class="h-4 w-4 rounded border-zinc-600 bg-zinc-800 text-indigo-600 focus:ring-indigo-500"
+					/>
+					<span class="text-sm text-zinc-300">Stream Mode</span>
+				</label>
+				<p class="mt-1 ml-7 text-xs text-zinc-500">
+					{#if embedForm.stream_mode}
+						Responses stream word-by-word (real-time feel)
+					{:else}
+						Wait for complete response before showing (better for tool calls)
+					{/if}
+				</p>
+			</div>
+
+			<!-- Theme Settings -->
+			<div class="border-t border-zinc-700 pt-4 mt-4">
+				<h4 class="text-sm font-medium text-zinc-200 mb-3">Appearance</h4>
+
+				<div class="grid grid-cols-2 gap-4">
+					<div>
+						<label class="block text-xs text-zinc-400 mb-1.5">Theme</label>
+						<select
+							bind:value={embedForm.theme}
+							class="w-full rounded-lg border border-zinc-600 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 focus:border-indigo-500 focus:outline-none"
+						>
+							<option value="dark">Dark</option>
+							<option value="light">Light</option>
+						</select>
+					</div>
+
+					<div>
+						<label class="block text-xs text-zinc-400 mb-1.5">Primary Color</label>
+						<div class="flex gap-2">
+							<input
+								type="color"
+								bind:value={embedForm.primary_color}
+								class="h-9 w-10 rounded border border-zinc-600 bg-zinc-800 cursor-pointer"
+							/>
+							<input
+								type="text"
+								bind:value={embedForm.primary_color}
+								placeholder="#6366f1"
+								class="flex-1 rounded-lg border border-zinc-600 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 focus:border-indigo-500 focus:outline-none font-mono"
+							/>
+						</div>
+					</div>
+				</div>
+
+				<!-- Advanced Colors (collapsible) -->
+				<details class="mt-3">
+					<summary class="text-xs text-zinc-500 cursor-pointer hover:text-zinc-400 select-none">
+						Advanced colors
+					</summary>
+					<div class="grid grid-cols-2 gap-4 mt-3">
+						<div>
+							<label class="block text-xs text-zinc-400 mb-1.5">Background Color</label>
+							<div class="flex gap-2">
+								<input
+									type="color"
+									bind:value={embedForm.bg_color}
+									class="h-9 w-10 rounded border border-zinc-600 bg-zinc-800 cursor-pointer"
+								/>
+								<input
+									type="text"
+									bind:value={embedForm.bg_color}
+									placeholder="Default"
+									class="flex-1 rounded-lg border border-zinc-600 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 focus:border-indigo-500 focus:outline-none font-mono placeholder:text-zinc-600"
+								/>
+							</div>
+						</div>
+
+						<div>
+							<label class="block text-xs text-zinc-400 mb-1.5">Text Color</label>
+							<div class="flex gap-2">
+								<input
+									type="color"
+									bind:value={embedForm.text_color}
+									class="h-9 w-10 rounded border border-zinc-600 bg-zinc-800 cursor-pointer"
+								/>
+								<input
+									type="text"
+									bind:value={embedForm.text_color}
+									placeholder="Default"
+									class="flex-1 rounded-lg border border-zinc-600 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 focus:border-indigo-500 focus:outline-none font-mono placeholder:text-zinc-600"
+								/>
+							</div>
+						</div>
+					</div>
+
+					<div class="mt-3">
+						<label class="block text-xs text-zinc-400 mb-1.5">Font Family</label>
+						<input
+							type="text"
+							bind:value={embedForm.font_family}
+							placeholder="e.g. Inter, system-ui"
+							class="w-full rounded-lg border border-zinc-600 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 focus:border-indigo-500 focus:outline-none placeholder:text-zinc-600"
+						/>
+					</div>
+				</details>
 			</div>
 
 			{#if embedConfig?.embed_enabled}
