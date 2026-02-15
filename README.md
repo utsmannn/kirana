@@ -331,7 +331,67 @@ curl -X POST http://localhost:8000/v1/providers/ \
 
 ### Knowledge Base
 
-#### Add Knowledge
+Kirana provides a built-in knowledge base that can be used to store documents, FAQs, and other information. The AI automatically searches this knowledge base when relevant to user queries.
+
+#### List Knowledge Items
+
+```bash
+curl "http://localhost:8000/v1/knowledge/?page=1&limit=20&search=faq" \
+  -H "Authorization: Bearer kirana-default-api-key-change-me"
+```
+
+**Query Parameters:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `page` | int | 1 | Page number |
+| `limit` | int | 20 | Items per page |
+| `search` | string | - | Search in title/content |
+
+**Response:**
+```json
+{
+  "items": [
+    {
+      "id": "uuid",
+      "title": "Product FAQ",
+      "content": "Our product supports...",
+      "content_type": "text",
+      "has_file": false,
+      "created_at": "2024-01-15T10:30:00Z",
+      "updated_at": "2024-01-15T10:30:00Z"
+    }
+  ],
+  "total": 1,
+  "page": 1,
+  "limit": 20,
+  "pages": 1
+}
+```
+
+#### Get Single Knowledge Item
+
+```bash
+curl http://localhost:8000/v1/knowledge/<knowledge-id> \
+  -H "Authorization: Bearer kirana-default-api-key-change-me"
+```
+
+**Response:**
+```json
+{
+  "id": "uuid",
+  "title": "Product FAQ",
+  "content": "Our product supports...",
+  "content_type": "text",
+  "has_file": false,
+  "file_name": null,
+  "file_size": null,
+  "mime_type": null,
+  "created_at": "2024-01-15T10:30:00Z",
+  "updated_at": "2024-01-15T10:30:00Z"
+}
+```
+
+#### Create Knowledge (Text)
 
 ```bash
 curl -X POST http://localhost:8000/v1/knowledge/ \
@@ -339,17 +399,132 @@ curl -X POST http://localhost:8000/v1/knowledge/ \
   -H "Content-Type: application/json" \
   -d '{
     "title": "Product FAQ",
-    "content": "Our product supports...",
-    "metadata": {"category": "documentation"}
+    "content": "Our product supports the following features...",
+    "content_type": "text"
   }'
 ```
 
-#### Search Knowledge
+**Request Body:**
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `title` | string | Yes | Title of the knowledge item |
+| `content` | string | Yes | Text content |
+| `content_type` | string | Yes | Type: `text`, `markdown`, `html`, `json` |
+
+#### Update Knowledge
 
 ```bash
-curl "http://localhost:8000/v1/knowledge/?q=product%20features" \
+curl -X PATCH http://localhost:8000/v1/knowledge/<knowledge-id> \
+  -H "Authorization: Bearer kirana-default-api-key-change-me" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Updated Title",
+    "content": "Updated content..."
+  }'
+```
+
+#### Delete Knowledge
+
+```bash
+curl -X DELETE http://localhost:8000/v1/knowledge/<knowledge-id> \
   -H "Authorization: Bearer kirana-default-api-key-change-me"
 ```
+
+#### Upload File (AI-Powered Analysis)
+
+Upload documents for automatic AI analysis and content extraction. Supported formats:
+
+| Format | Extension | Processing Method |
+|--------|-----------|-------------------|
+| PDF | `.pdf` | Native text extraction + Vision API fallback for scanned PDFs |
+| Word | `.docx` | Text extraction + AI summary |
+| Excel | `.xlsx`, `.xls` | Converted to images + Vision API analysis |
+| PowerPoint | `.pptx` | Text extraction + AI summary |
+| Images | `.png`, `.jpg`, `.jpeg` | Vision API analysis |
+
+```bash
+curl -X POST http://localhost:8000/v1/knowledge/upload \
+  -H "Authorization: Bearer kirana-default-api-key-change-me" \
+  -F "file=@document.pdf" \
+  -F "title=Annual Report 2024"
+```
+
+**Form Data:**
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `file` | file | Yes | Document file (PDF, Word, Excel, PPT, or image) |
+| `title` | string | No | Custom title (defaults to filename) |
+
+**Response:**
+```json
+{
+  "id": "uuid",
+  "title": "Annual Report 2024",
+  "content": "# Document Summary\n\n[AI-generated summary of the document content...]\n\n---\n\n## Raw Content\n\n[Original extracted text from the document...]",
+  "content_type": "pdf",
+  "has_file": true,
+  "file_name": "document.pdf",
+  "file_size": 245760,
+  "mime_type": "application/pdf",
+  "created_at": "2024-01-15T10:30:00Z",
+  "updated_at": "2024-01-15T10:30:00Z"
+}
+```
+
+**Processing Pipeline:**
+
+1. **PDF Files:**
+   - Native text extraction using OCR
+   - If successful → AI analysis → Save summary + raw text
+   - If scanned/empty → Convert to images → Vision API → Save analysis
+
+2. **Excel Files:**
+   - Each sheet converted to image
+   - Vision API analyzes all images
+   - Detailed data extraction (values, formulas, charts)
+
+3. **Word/PowerPoint:**
+   - Text extraction
+   - AI summary generation
+   - Combined summary + raw text saved
+
+4. **Images:**
+   - Direct Vision API analysis
+   - Detailed description saved
+
+#### Download Original File
+
+Download the original uploaded file:
+
+```bash
+curl http://localhost:8000/v1/knowledge/<knowledge-id>/download \
+  -H "Authorization: Bearer kirana-default-api-key-change-me" \
+  -o downloaded_file.pdf
+```
+
+**Response:** Binary file with appropriate `Content-Type` and `Content-Disposition` headers.
+
+#### Knowledge Response Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Unique identifier (UUID) |
+| `title` | string | Title of the knowledge item |
+| `content` | string | AI-generated summary + raw text content |
+| `content_type` | string | Type: `text`, `markdown`, `pdf`, `word`, `excel`, `ppt`, `image` |
+| `has_file` | boolean | Whether a file is attached |
+| `file_name` | string | Original filename (if uploaded) |
+| `file_size` | integer | File size in bytes (if uploaded) |
+| `mime_type` | string | Original MIME type (if uploaded) |
+| `created_at` | string | ISO 8601 timestamp |
+| `updated_at` | string | ISO 8601 timestamp |
+
+#### Environment Variables for File Processing
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `ZAI_API_KEY` | Z.AI API key for Vision API | Yes (for file uploads) |
+| `POPPLER_PATH` | Path to poppler binaries (Windows) | Optional |
 
 ### Admin Endpoints
 
