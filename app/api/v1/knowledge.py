@@ -19,8 +19,13 @@ from app.schemas.knowledge import (
     KnowledgeListResponse,
     KnowledgeResponse,
     KnowledgeUpdate,
+    WebCrawlRequest,
+    WebCrawlResponse,
+    WebScrapeRequest,
+    WebScrapeResponse,
 )
 from app.services.file_processor import FileProcessor, get_mime_type
+from app.services.web_scraper import WebScraper, crawl_website, scrape_single_url
 from app.services.zai_vision import get_zai_vision_service, is_zai_vision_configured
 
 logger = logging.getLogger(__name__)
@@ -669,6 +674,136 @@ Format output:
     logger.info("[UPLOAD] Upload complete. Knowledge ID: %s", knowledge.id)
 
     return knowledge
+
+
+@router.post("/scrape-web", response_model=WebScrapeResponse, status_code=status.HTTP_201_CREATED)
+async def scrape_web_url(
+    request: WebScrapeRequest,
+    api_key: str = Depends(deps.verify_api_key),
+    db: AsyncSession = Depends(deps.get_db_session),
+):
+    """Scrape a single URL and create knowledge entry."""
+    logger.info("[WEB_SCRAPE] Scraping URL: %s", request.url)
+
+    try:
+        result = await scrape_single_url(request.url)
+
+        if not result.success:
+            return WebScrapeResponse(
+                success=False,
+                url=request.url,
+                title="",
+                content="",
+                content_length=0,
+                error=result.error or "Failed to scrape URL",
+            )
+
+        # Create knowledge entry
+        knowledge = Knowledge(
+            title=result.title,
+            content=result.content,
+            content_type="web",
+            source_type="web",
+            source_url=result.url,
+            extra_metadata={
+                "scraped_at": result.url,
+                "content_length": len(result.content),
+            },
+        )
+        db.add(knowledge)
+        await db.commit()
+        await db.refresh(knowledge)
+
+        logger.info("[WEB_SCRAPE] Created knowledge %s from %s", knowledge.id, request.url)
+
+        return WebScrapeResponse(
+            success=True,
+            url=result.url,
+            title=result.title,
+            content=result.content,
+            content_length=len(result.content),
+        )
+
+    except Exception as e:
+        logger.exception("[WEB_SCRAPE] Error scraping %s: %s", request.url, e)
+        return WebScrapeResponse(
+            success=False,
+            url=request.url,
+            title="",
+            content="",
+            content_length=0,
+            error=str(e),
+        )
+
+
+@router.post("/crawl-web", response_model=WebCrawlResponse, status_code=status.HTTP_201_CREATED)
+async def crawl_web_site(
+    request: WebCrawlRequest,
+    api_key: str = Depends(deps.verify_api_key),
+    db: AsyncSession = Depends(deps.get_db_session),
+):
+    """Crawl a website and create knowledge entries for each page."""
+    logger.info(
+        "[WEB_CRAWL] Crawling %s (max_pages=%d, max_depth=%d)",
+        request.url, request.max_pages, request.max_depth
+    )
+
+    try:
+        result = await crawl_website(
+            start_url=request.url,
+            max_pages=request.max_pages,
+            max_depth=request.max_depth,
+            path_prefix=request.path_prefix,
+        )
+
+        knowledge_ids = []
+
+        # Create knowledge entries for successful pages
+        for page in result.pages:
+            if page.success and page.content.strip():
+                knowledge = Knowledge(
+                    title=page.title,
+                    content=page.content,
+                    content_type="web",
+                    source_type="web",
+                    source_url=page.url,
+                    extra_metadata={
+                        "crawled_from": request.url,
+                        "content_length": len(page.content),
+                    },
+                )
+                db.add(knowledge)
+                await db.flush()  # Get ID without full commit
+                knowledge_ids.append(knowledge.id)
+
+        await db.commit()
+
+        logger.info(
+            "[WEB_CRAWL] Created %d knowledge entries from %s",
+            len(knowledge_ids), request.url
+        )
+
+        return WebCrawlResponse(
+            success=True,
+            start_url=request.url,
+            total_pages=result.total_pages,
+            successful_pages=result.successful_pages,
+            failed_pages=result.failed_pages,
+            knowledge_ids=knowledge_ids,
+            errors=result.errors[:10] if result.errors else [],  # Limit errors in response
+        )
+
+    except Exception as e:
+        logger.exception("[WEB_CRAWL] Error crawling %s: %s", request.url, e)
+        return WebCrawlResponse(
+            success=False,
+            start_url=request.url,
+            total_pages=0,
+            successful_pages=0,
+            failed_pages=1,
+            knowledge_ids=[],
+            errors=[str(e)],
+        )
 
 
 @router.get("/{knowledge_id}/download")

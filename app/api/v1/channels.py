@@ -21,6 +21,9 @@ class ChannelCreate(BaseModel):
     provider_id: UUID
     system_prompt: Optional[str] = None
     personality_name: Optional[str] = None
+    # Context guard fields
+    context: Optional[str] = Field(None, max_length=255, description="Context/entity name for AI scope limitation")
+    context_description: Optional[str] = Field(None, description="Detailed context description")
 
 
 class ChannelUpdate(BaseModel):
@@ -28,6 +31,9 @@ class ChannelUpdate(BaseModel):
     provider_id: Optional[UUID] = None
     system_prompt: Optional[str] = None
     personality_name: Optional[str] = None
+    # Context guard fields
+    context: Optional[str] = Field(None, max_length=255, description="Context/entity name for AI scope limitation")
+    context_description: Optional[str] = Field(None, description="Detailed context description")
 
 
 class ChannelResponse(BaseModel):
@@ -37,6 +43,9 @@ class ChannelResponse(BaseModel):
     provider_name: Optional[str] = None
     system_prompt: Optional[str]
     personality_name: Optional[str]
+    # Context guard fields
+    context: Optional[str] = None
+    context_description: Optional[str] = None
     is_default: bool
     created_at: str
     # Embed fields
@@ -52,6 +61,8 @@ class ChannelResponse(BaseModel):
             provider_name=provider_name,
             system_prompt=obj.system_prompt,
             personality_name=obj.personality_name,
+            context=obj.context,
+            context_description=obj.context_description,
             is_default=obj.is_default,
             created_at=obj.created_at.isoformat() if obj.created_at else None,
             embed_enabled=obj.embed_enabled,
@@ -137,6 +148,8 @@ async def create_channel(
         provider_id=data.provider_id,
         system_prompt=data.system_prompt,
         personality_name=data.personality_name,
+        context=data.context,
+        context_description=data.context_description,
         is_default=False,
     )
     db.add(channel)

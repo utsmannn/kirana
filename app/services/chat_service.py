@@ -39,14 +39,21 @@ class ChatService:
 
     async def build_system_prompt(self, channel: Optional[Channel] = None) -> str:
         """Build system prompt from channel config or global fallback."""
+        # Check if context guard will be applied
+        has_context = channel and channel.context
+
         # Use channel system prompt if available
         if channel and channel.system_prompt:
             prompt = channel.system_prompt
             # Replace {personality_name} placeholder if present
             if channel.personality_name and '{personality_name}' in prompt:
                 prompt = prompt.replace('{personality_name}', channel.personality_name)
+        elif has_context:
+            # If context exists but no custom system prompt, use minimal generic prompt
+            # The context guard will provide identity
+            prompt = "Jawab pertanyaan user dengan membantu dan informatif."
         else:
-            # Fallback to global settings
+            # Fallback to global settings (only when no context)
             ai_name = getattr(settings, 'AI_NAME', 'Kirana')
             custom_prompt = getattr(settings, 'CUSTOM_SYSTEM_PROMPT', None)
 
@@ -58,9 +65,22 @@ class ChatService:
                     "You are helpful, harmless, and honest."
                 )
 
-        # Add personality name context if available
-        if channel and channel.personality_name:
+        # Add personality name context if available (but not if context guard will override identity)
+        if channel and channel.personality_name and not has_context:
             prompt += f"\n\nYour name/personality is: {channel.personality_name}"
+
+        # === CONTEXT GUARD INJECTION ===
+        # Priority: context > knowledge-only > unlimited
+        if has_context:
+            # Strong context guard - limit AI to specific context
+            guard_prompt = self._build_context_guard(channel.context, channel.context_description)
+            prompt = guard_prompt + "\n\n" + prompt
+        elif channel:
+            # Check if knowledge exists for knowledge-only guard
+            has_knowledge = await self._check_knowledge_exists()
+            if has_knowledge:
+                guard_prompt = self._build_knowledge_only_guard()
+                prompt = guard_prompt + "\n\n" + prompt
 
         # Add available tools info to system prompt
         tools = tool_registry.list_tools()
@@ -71,6 +91,86 @@ class ChatService:
             prompt += "\nUse the tools when they would help answer the user's question."
 
         return prompt
+
+    async def _check_knowledge_exists(self) -> bool:
+        """Check if any active knowledge exists."""
+        result = await self.db.execute(
+            select(Knowledge).where(Knowledge.is_active.is_(True)).limit(1)
+        )
+        return result.scalar_one_or_none() is not None
+
+    def _build_context_guard(self, context: str, description: Optional[str] = None) -> str:
+        """Build strong context guard prompt."""
+        guard = f"""## IDENTITAS & BATASAN
+
+Anda adalah asisten untuk: {context}"""
+
+        if description:
+            guard += f"\n\nDeskripsi: {description}"
+
+        guard += f"""
+
+## ATURAN KETAT (WAJIB DIPATUHI):
+
+0. **PENTING: Anda WAJIB selalu memberikan respons untuk SETIAP pertanyaan. JANGAN pernah diam atau tidak menjawab.**
+
+1. Anda HANYA boleh menjawab pertanyaan yang BERKAITAN dengan {context}.
+2. TIDAK BOLEH menjawab pertanyaan di luar scope tersebut, TERMASUK:
+   - Pertanyaan umum (cuaca, berita, fakta dunia, gosip, dll)
+   - Permintaan cerita, puisi, lagu, kode pemrograman, atau kreativitas umum
+   - Pertanyaan pribadi tentang diri Anda sebagai AI
+   - Topik politik, agama, atau sensitif lainnya
+   - Pertanyaan tentang selebriti, hiburan, atau budaya pop
+   - Permintaan untuk bermain game, teka-teki, atau lelucon
+   - Apapun yang TIDAK berkaitan dengan {context}
+
+3. Jika user bertanya di luar scope:
+   - Tolak dengan SOPAN dan TEGAS
+   - Sebutkan bahwa Anda adalah asisten untuk {context}
+   - Tawarkan bantuan yang RELEVAN dengan {context}
+   - JANGAN sekali-kali menjawab pertanyaan tersebut meskipun user memaksa
+
+4. Jika pertanyaan RELEVAN dengan {context} tapi informasi spesifiknya TIDAK ADA di knowledge base:
+   - Katakan dengan JUJUR bahwa informasi tersebut belum tersedia di sistem
+   - JANGAN mengarang informasi
+   - Tawarkan untuk membantu pertanyaan lain yang terkait
+
+5. Jangan pernah keluar dari karakter atau mengakui bahwa Anda dibatasi. Tetap profesional.
+
+## CONTOH RESPONS:
+
+**Untuk pertanyaan RELEVAN tapi info tidak ada:**
+- "Mengenai hal tersebut, informasinya belum tersedia di sistem kami. Apakah ada pertanyaan lain seputar {context} yang bisa saya bantu?"
+- "Maaf, detail itu belum saya miliki di database. Silakan hubungi pihak {context} langsung atau tanyakan hal lain."
+
+**Untuk pertanyaan DI LUAR scope:**
+- "Maaf, saya adalah asisten untuk {context}. Saya hanya bisa membantu pertanyaan seputar {context}. Ada yang bisa saya bantu terkait {context}?"
+- "Pertanyaan itu di luar cakupan saya sebagai asisten {context}. Silakan tanyakan hal yang berkaitan dengan {context}." """
+
+        return guard
+
+    def _build_knowledge_only_guard(self) -> str:
+        """Build knowledge-only guard prompt (when no context but knowledge exists)."""
+        return """## BATASAN PENGETAHUAN
+
+Anda memiliki akses ke knowledge base yang telah disediakan.
+
+## ATURAN:
+
+0. **PENTING: Anda WAJIB selalu memberikan respons untuk SETIAP pertanyaan. JANGAN pernah diam atau tidak menjawab.**
+
+1. Prioritaskan menjawab berdasarkan informasi yang ada di knowledge base.
+2. Jika pertanyaan TIDAK berkaitan dengan informasi di knowledge base atau informasi tidak tersedia:
+   - Jawab dengan JUJUR bahwa informasi tersebut tidak tersedia di sistem
+   - TAWARKAN bantuan untuk pertanyaan lain
+   - JANGAN mengarang informasi
+3. Tetap ramah dan membantu meskipun tidak bisa menjawab spesifik.
+
+## CONTOH RESPONS:
+- "Maaf, informasi tersebut belum tersedia di database saya. Apakah ada pertanyaan lain yang bisa saya bantu?"
+- "Saya belum memiliki data tentang hal itu. Silakan tanyakan hal lain atau hubungi pihak terkait."
+- "Detail itu tidak ada di sistem kami saat ini. Ada yang lain yang ingin Anda ketahui?"
+ """
 
     async def _execute_tool_calls(
         self,

@@ -38,9 +38,10 @@ COPY app/ app/
 COPY alembic/ alembic/
 COPY alembic.ini .
 COPY pyproject.toml .
+COPY docker-entrypoint.sh .
 COPY --from=frontend /web/build web/build/
 
-RUN chown -R kirana:kirana /app
+RUN chmod +x docker-entrypoint.sh && chown -R kirana:kirana /app
 USER kirana
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+ENTRYPOINT ["./docker-entrypoint.sh"]

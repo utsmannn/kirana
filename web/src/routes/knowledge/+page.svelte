@@ -6,6 +6,8 @@
 		updateKnowledge,
 		deleteKnowledge,
 		uploadKnowledgeFile,
+		scrapeWebUrl,
+		crawlWebsite,
 		ApiError,
 		type KnowledgeItem,
 		type PaginatedResponse
@@ -31,12 +33,20 @@
 	let saving = $state(false);
 
 	// File upload state
-	let uploadMode = $state<'text' | 'file'>('text');
+	let uploadMode = $state<'text' | 'file' | 'web'>('text');
 	let selectedFile = $state<File | null>(null);
 	let uploading = $state(false);
 	let uploadProgress = $state(0);
 	let uploadStage = $state<'idle' | 'uploading' | 'analyzing'>('idle');
 	let uploadTimer: ReturnType<typeof setTimeout> | null = null;
+
+	// Web scraping state
+	let webUrl = $state('');
+	let crawlMode = $state<'single' | 'crawl'>('single');
+	let crawlMaxPages = $state(50);
+	let crawlMaxDepth = $state(3);
+	let crawlPathPrefix = $state('');
+	let scraping = $state(false);
 
 	// Image types that require AI analysis
 	const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp'];
@@ -107,6 +117,11 @@
 		selectedFile = null;
 		uploadProgress = 0;
 		uploadStage = 'idle';
+		webUrl = '';
+		crawlMode = 'single';
+		crawlMaxPages = 50;
+		crawlMaxDepth = 3;
+		crawlPathPrefix = '';
 		if (uploadTimer) {
 			clearTimeout(uploadTimer);
 			uploadTimer = null;
@@ -169,6 +184,57 @@
 		}
 	}
 
+	async function handleWebScrape(e: Event) {
+		e.preventDefault();
+		if (!apiKey.value || !webUrl.trim()) return;
+
+		// Basic URL validation
+		try {
+			new URL(webUrl);
+		} catch {
+			showToast('Please enter a valid URL', 'error');
+			return;
+		}
+
+		scraping = true;
+
+		try {
+			if (crawlMode === 'single') {
+				const result = await scrapeWebUrl(apiKey.value, webUrl.trim());
+				if (result.success) {
+					showToast(`Scraped: ${result.title}`, 'success');
+					modalOpen = false;
+					webUrl = '';
+					await loadItems();
+				} else {
+					showToast(result.error || 'Failed to scrape URL', 'error');
+				}
+			} else {
+				const result = await crawlWebsite(apiKey.value, webUrl.trim(), {
+					max_pages: crawlMaxPages,
+					max_depth: crawlMaxDepth,
+					path_prefix: crawlPathPrefix.trim() || undefined
+				});
+				if (result.success) {
+					showToast(`Crawled ${result.successful_pages} pages from website`, 'success');
+					modalOpen = false;
+					webUrl = '';
+					await loadItems();
+				} else {
+					showToast(result.errors[0] || 'Failed to crawl website', 'error');
+				}
+			}
+		} catch (err) {
+			if (err instanceof ApiError) {
+				showToast(err.message, 'error');
+			} else {
+				showToast('Failed to scrape website', 'error');
+			}
+		} finally {
+			scraping = false;
+		}
+	}
+
 	function openEdit(item: KnowledgeItem) {
 		editing = item;
 		formTitle = item.title;
@@ -183,6 +249,12 @@
 		// If in file upload mode, use handleUpload instead
 		if (uploadMode === 'file' && !editing) {
 			await handleUpload(e);
+			return;
+		}
+
+		// If in web scraping mode, use handleWebScrape instead
+		if (uploadMode === 'web' && !editing) {
+			await handleWebScrape(e);
 			return;
 		}
 
@@ -350,6 +422,13 @@
 											>
 												{isImage ? 'Image' : isPdf ? 'PDF' : 'File'}
 											</span>
+										{:else if item.source_type === 'web'}
+											<span
+												class="shrink-0 rounded bg-emerald-900/50 px-2 py-0.5 text-[10px] font-medium text-emerald-300"
+												title={item.source_url}
+											>
+												Web
+											</span>
 										{/if}
 									</div>
 									<p class="mt-2 line-clamp-2 text-sm text-zinc-400">
@@ -475,7 +554,7 @@
 </div>
 
 <!-- Create/Edit Modal -->
-<Modal open={modalOpen} title={modalTitle} onClose={() => (modalOpen = false)} closable={!uploading && !saving}>
+<Modal open={modalOpen} title={modalTitle} onClose={() => (modalOpen = false)} closable={!uploading && !saving && !scraping}>
 	<form onsubmit={handleSave} class="space-y-4">
 		<div>
 			<label for="entry-title" class="block text-sm font-medium text-zinc-300">Title</label>
@@ -504,6 +583,13 @@
 					class="flex-1 rounded px-3 py-1.5 text-sm font-medium transition-colors {uploadMode === 'file' ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200'}"
 				>
 					Upload File
+				</button>
+				<button
+					type="button"
+					onclick={() => (uploadMode = 'web')}
+					class="flex-1 rounded px-3 py-1.5 text-sm font-medium transition-colors {uploadMode === 'web' ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200'}"
+				>
+					Web URL
 				</button>
 			</div>
 		{/if}
@@ -535,7 +621,7 @@
 					class="mt-1.5 block w-full resize-y rounded-lg border border-zinc-600 bg-zinc-700 px-3.5 py-2.5 text-sm text-zinc-100 placeholder-zinc-400 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-none"
 				></textarea>
 			</div>
-		{:else}
+		{:else if uploadMode === 'file'}
 			<!-- File upload UI -->
 			<div>
 				<label class="block text-sm font-medium text-zinc-300">File</label>
@@ -598,12 +684,100 @@
 					</div>
 				{/if}
 			</div>
+		{:else if uploadMode === 'web'}
+			<!-- Web scraping UI -->
+			<div>
+				<label for="web-url" class="block text-sm font-medium text-zinc-300">Website URL</label>
+				<input
+					id="web-url"
+					type="url"
+					bind:value={webUrl}
+					placeholder="https://example.com"
+					class="mt-1.5 block w-full rounded-lg border border-zinc-600 bg-zinc-700 px-3.5 py-2.5 text-sm text-zinc-100 placeholder-zinc-400 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+				/>
+			</div>
+
+			<!-- Crawl mode toggle -->
+			<div class="flex rounded-lg border border-zinc-600 bg-zinc-800 p-1">
+				<button
+					type="button"
+					onclick={() => (crawlMode = 'single')}
+					class="flex-1 rounded px-3 py-1.5 text-sm font-medium transition-colors {crawlMode === 'single' ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200'}"
+				>
+					Single Page
+				</button>
+				<button
+					type="button"
+					onclick={() => (crawlMode = 'crawl')}
+					class="flex-1 rounded px-3 py-1.5 text-sm font-medium transition-colors {crawlMode === 'crawl' ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200'}"
+				>
+					Crawl Site
+				</button>
+			</div>
+
+			{#if crawlMode === 'crawl'}
+				<div class="space-y-3 rounded-lg border border-zinc-700 bg-zinc-800/50 p-3">
+					<div class="grid grid-cols-2 gap-3">
+						<div>
+							<label for="max-pages" class="block text-xs font-medium text-zinc-400">Max Pages</label>
+							<input
+								id="max-pages"
+								type="number"
+								bind:value={crawlMaxPages}
+								min="1"
+								max="100"
+								class="mt-1 block w-full rounded-lg border border-zinc-600 bg-zinc-700 px-3 py-2 text-sm text-zinc-100 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+							/>
+						</div>
+						<div>
+							<label for="max-depth" class="block text-xs font-medium text-zinc-400">Max Depth</label>
+							<input
+								id="max-depth"
+								type="number"
+								bind:value={crawlMaxDepth}
+								min="1"
+								max="5"
+								class="mt-1 block w-full rounded-lg border border-zinc-600 bg-zinc-700 px-3 py-2 text-sm text-zinc-100 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+							/>
+						</div>
+					</div>
+					<div>
+						<label for="path-prefix" class="block text-xs font-medium text-zinc-400">Path Prefix (optional)</label>
+						<input
+							id="path-prefix"
+							type="text"
+							bind:value={crawlPathPrefix}
+							placeholder="/blog/"
+							class="mt-1 block w-full rounded-lg border border-zinc-600 bg-zinc-700 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+						/>
+						<p class="mt-1 text-xs text-zinc-500">Only crawl URLs starting with this path</p>
+					</div>
+				</div>
+			{/if}
+
+			{#if scraping}
+				<div class="flex items-center gap-2 text-sm text-zinc-400">
+					<svg class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
+						<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+						<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+					</svg>
+					{crawlMode === 'single' ? 'Scraping page...' : 'Crawling website...'}
+				</div>
+			{/if}
 		{/if}
 
 		<div class="flex justify-end gap-3 pt-2">
 			<Button variant="secondary" onclick={() => (modalOpen = false)}>Cancel</Button>
-			<Button type="submit" loading={saving || uploading} disabled={uploadMode === 'file' && !selectedFile}>
-				{saving ? 'Saving...' : uploading ? (uploadStage === 'analyzing' ? 'Analyzing...' : 'Uploading...') : editing ? 'Update' : uploadMode === 'file' ? 'Upload' : 'Create'}
+			<Button type="submit" loading={saving || uploading || scraping} disabled={(uploadMode === 'file' && !selectedFile) || (uploadMode === 'web' && !webUrl.trim())}>
+				{#if saving}
+					Saving...
+				{:else if uploading}
+					{uploadStage === 'analyzing' ? 'Analyzing...' : 'Uploading...'}
+				{:else if scraping}
+					{crawlMode === 'single' ? 'Scraping...' : 'Crawling...'}
+				{:else}
+					{editing ? 'Update' : uploadMode === 'file' ? 'Upload' : uploadMode === 'web' ? (crawlMode === 'single' ? 'Scrape' : 'Crawl') : 'Create'}
+				{/if}
 			</Button>
 		</div>
 	</form>

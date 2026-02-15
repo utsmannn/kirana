@@ -359,6 +359,9 @@ export interface KnowledgeItem {
 	content_type: string;
 	created_at: string;
 	updated_at: string;
+	// Source info
+	source_type?: string;
+	source_url?: string;
 	// File metadata (for uploaded files)
 	file_name?: string;
 	file_size?: number;
@@ -421,6 +424,58 @@ export function uploadKnowledgeFile(
 		token,
 		body: formData
 		// Note: Don't set Content-Type header for FormData, browser will set it with boundary
+	});
+}
+
+// Web scraping response types
+export interface WebScrapeResponse {
+	success: boolean;
+	url: string;
+	title: string;
+	content: string;
+	content_length: number;
+	error?: string;
+}
+
+export interface WebCrawlResponse {
+	success: boolean;
+	start_url: string;
+	total_pages: number;
+	successful_pages: number;
+	failed_pages: number;
+	knowledge_ids: string[];
+	errors: string[];
+}
+
+export function scrapeWebUrl(
+	token: string,
+	url: string
+): Promise<WebScrapeResponse> {
+	return request('/knowledge/scrape-web', {
+		method: 'POST',
+		token,
+		body: JSON.stringify({ url })
+	});
+}
+
+export function crawlWebsite(
+	token: string,
+	url: string,
+	options?: {
+		max_pages?: number;
+		max_depth?: number;
+		path_prefix?: string;
+	}
+): Promise<WebCrawlResponse> {
+	return request('/knowledge/crawl-web', {
+		method: 'POST',
+		token,
+		body: JSON.stringify({
+			url,
+			max_pages: options?.max_pages ?? 50,
+			max_depth: options?.max_depth ?? 3,
+			path_prefix: options?.path_prefix
+		})
 	});
 }
 
@@ -523,6 +578,9 @@ export interface Channel {
 	provider_name?: string;
 	system_prompt: string | null;
 	personality_name: string | null;
+	// Context guard fields
+	context: string | null;
+	context_description: string | null;
 	is_default: boolean;
 	created_at: string;
 	// Embed fields
@@ -567,6 +625,9 @@ export interface ChannelCreate {
 	provider_id: string;
 	system_prompt?: string;
 	personality_name?: string;
+	// Context guard fields
+	context?: string;
+	context_description?: string;
 }
 
 export function getChannels(token: string): Promise<ChannelsResponse> {

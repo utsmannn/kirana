@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 
 from app.models.base import Base
@@ -20,6 +20,9 @@ class Channel(Base):
     provider_id = Column(UUID(as_uuid=True), ForeignKey("provider_credentials.id"), nullable=False)
     system_prompt = Column(String, nullable=True)
     personality_name = Column(String(100), nullable=True)
+    # Context guard fields - limit AI responses to specific context
+    context = Column(String(255), nullable=True)  # e.g., "SMK Negeri 1", "TokoBaju App"
+    context_description = Column(Text, nullable=True)  # Detailed description
     is_default = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), default=_utcnow)
     updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)

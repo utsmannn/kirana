@@ -41,7 +41,9 @@
 		name: '',
 		provider_id: '',
 		system_prompt: '',
-		personality_name: ''
+		personality_name: '',
+		context: '',
+		context_description: ''
 	});
 
 	// Embed modal
@@ -98,7 +100,9 @@
 			name: channel?.name || '',
 			provider_id: channel?.provider_id || providers[0]?.id || '',
 			system_prompt: channel?.system_prompt || '',
-			personality_name: channel?.personality_name || ''
+			personality_name: channel?.personality_name || '',
+			context: channel?.context || '',
+			context_description: channel?.context_description || ''
 		};
 		showChannelModal = true;
 	}
@@ -116,7 +120,9 @@
 				name: channelForm.name,
 				provider_id: channelForm.provider_id,
 				system_prompt: channelForm.system_prompt || undefined,
-				personality_name: channelForm.personality_name || undefined
+				personality_name: channelForm.personality_name || undefined,
+				context: channelForm.context || undefined,
+				context_description: channelForm.context_description || undefined
 			};
 
 			if (editingChannel) {
@@ -243,12 +249,16 @@
 	}
 
 	function getEmbedUrl(): string {
-		// Use embed_url from backend response if available
+		const baseUrl = window.location.origin;
+		// Use embed_url from backend response if available, but always prepend host
 		if (embedConfig?.embed_url) {
+			// If backend returns relative path, prepend host
+			if (embedConfig.embed_url.startsWith('/')) {
+				return `${baseUrl}${embedConfig.embed_url}`;
+			}
 			return embedConfig.embed_url;
 		}
 		// Fallback to constructing URL
-		const baseUrl = window.location.origin;
 		return `${baseUrl}/embed/${embedChannel?.id}`;
 	}
 
@@ -454,6 +464,34 @@
 				placeholder="e.g. Friendly Helper, Code Expert"
 				class="mt-1 block w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 focus:border-indigo-500 focus:outline-none"
 			/>
+		</div>
+
+		<div class="border-t border-zinc-700 pt-4">
+			<label class="block text-sm font-medium text-zinc-300">Context Guard</label>
+			<p class="mt-1 text-xs text-zinc-500">
+				Limit AI responses to a specific context (e.g., school, product, service).
+				If empty and knowledge exists, AI will be limited to knowledge-only.
+			</p>
+			<div class="mt-3 space-y-3">
+				<div>
+					<label class="block text-xs text-zinc-400">Context Name</label>
+					<input
+						type="text"
+						bind:value={channelForm.context}
+						placeholder="e.g. SMK Negeri 1, TokoBaju App, Customer Service Bank ABC"
+						class="mt-1 block w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 focus:border-indigo-500 focus:outline-none"
+					/>
+				</div>
+				<div>
+					<label class="block text-xs text-zinc-400">Context Description (optional)</label>
+					<textarea
+						bind:value={channelForm.context_description}
+						placeholder="Detailed description of the context, e.g. school programs, product features, services offered..."
+						rows="3"
+						class="mt-1 block w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 focus:border-indigo-500 focus:outline-none"
+					></textarea>
+				</div>
+			</div>
 		</div>
 
 		<div>

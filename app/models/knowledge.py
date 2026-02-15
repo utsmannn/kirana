@@ -19,7 +19,13 @@ class Knowledge(Base):
     client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id"), nullable=True)
     title = Column(String(255), nullable=False)
     content = Column(Text, nullable=False)  # Extracted text content
-    content_type = Column(String(50), default="text")  # text, image, pdf, docx, xlsx, etc.
+    content_type = Column(String(50), default="text")  # text, image, pdf, docx, xlsx, web, etc.
+
+    # Source type: 'manual', 'file', 'web'
+    source_type = Column(String(20), default="manual")
+
+    # Web source metadata
+    source_url = Column(String(1000), nullable=True)  # Original URL for web sources
 
     # File metadata (for uploaded files)
     file_path = Column(String(500), nullable=True)  # Path to stored file
