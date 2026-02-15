@@ -742,7 +742,7 @@ async def crawl_web_site(
     api_key: str = Depends(deps.verify_api_key),
     db: AsyncSession = Depends(deps.get_db_session),
 ):
-    """Crawl a website and create knowledge entries for each page."""
+    """Crawl a website and create ONE combined knowledge entry with all pages."""
     logger.info(
         "[WEB_CRAWL] Crawling %s (max_pages=%d, max_depth=%d)",
         request.url, request.max_pages, request.max_depth
@@ -756,31 +756,56 @@ async def crawl_web_site(
             path_prefix=request.path_prefix,
         )
 
-        knowledge_ids = []
+        # Combine all successful pages into ONE knowledge entry
+        successful_pages = [p for p in result.pages if p.success and p.content.strip()]
 
-        # Create knowledge entries for successful pages
-        for page in result.pages:
-            if page.success and page.content.strip():
-                knowledge = Knowledge(
-                    title=page.title,
-                    content=page.content,
-                    content_type="web",
-                    source_type="web",
-                    source_url=page.url,
-                    extra_metadata={
-                        "crawled_from": request.url,
-                        "content_length": len(page.content),
-                    },
-                )
-                db.add(knowledge)
-                await db.flush()  # Get ID without full commit
-                knowledge_ids.append(knowledge.id)
+        if not successful_pages:
+            return WebCrawlResponse(
+                success=False,
+                start_url=request.url,
+                total_pages=result.total_pages,
+                successful_pages=0,
+                failed_pages=result.failed_pages,
+                knowledge_ids=[],
+                errors=["No content could be extracted from any page"],
+            )
 
+        # Build combined content with page separators
+        combined_parts = []
+        page_urls = []
+
+        for page in successful_pages:
+            page_urls.append(page.url)
+            combined_parts.append(f"## Page: {page.title}\n**URL:** {page.url}\n\n{page.content}")
+
+        combined_content = "\n\n---\n\n".join(combined_parts)
+
+        # Extract main title from first page or URL
+        main_title = successful_pages[0].title if successful_pages else urlparse(request.url).netloc
+        if len(successful_pages) > 1:
+            main_title = f"{main_title} (and {len(successful_pages) - 1} more pages)"
+
+        # Create SINGLE knowledge entry
+        knowledge = Knowledge(
+            title=main_title,
+            content=combined_content,
+            content_type="web",
+            source_type="web",
+            source_url=request.url,
+            extra_metadata={
+                "crawl_type": "multi_page",
+                "pages_crawled": len(successful_pages),
+                "page_urls": page_urls,
+                "total_content_length": len(combined_content),
+            },
+        )
+        db.add(knowledge)
         await db.commit()
+        await db.refresh(knowledge)
 
         logger.info(
-            "[WEB_CRAWL] Created %d knowledge entries from %s",
-            len(knowledge_ids), request.url
+            "[WEB_CRAWL] Created 1 combined knowledge entry from %d pages (%s)",
+            len(successful_pages), request.url
         )
 
         return WebCrawlResponse(
@@ -789,8 +814,8 @@ async def crawl_web_site(
             total_pages=result.total_pages,
             successful_pages=result.successful_pages,
             failed_pages=result.failed_pages,
-            knowledge_ids=knowledge_ids,
-            errors=result.errors[:10] if result.errors else [],  # Limit errors in response
+            knowledge_ids=[knowledge.id],
+            errors=result.errors[:5] if result.errors else [],
         )
 
     except Exception as e:

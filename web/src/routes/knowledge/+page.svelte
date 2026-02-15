@@ -188,9 +188,15 @@
 		e.preventDefault();
 		if (!apiKey.value || !webUrl.trim()) return;
 
+		// Normalize URL - add https:// if missing
+		let url = webUrl.trim();
+		if (!url.startsWith('http://') && !url.startsWith('https://')) {
+			url = 'https://' + url;
+		}
+
 		// Basic URL validation
 		try {
-			new URL(webUrl);
+			new URL(url);
 		} catch {
 			showToast('Please enter a valid URL', 'error');
 			return;
@@ -200,7 +206,7 @@
 
 		try {
 			if (crawlMode === 'single') {
-				const result = await scrapeWebUrl(apiKey.value, webUrl.trim());
+				const result = await scrapeWebUrl(apiKey.value, url);
 				if (result.success) {
 					showToast(`Scraped: ${result.title}`, 'success');
 					modalOpen = false;
@@ -210,7 +216,7 @@
 					showToast(result.error || 'Failed to scrape URL', 'error');
 				}
 			} else {
-				const result = await crawlWebsite(apiKey.value, webUrl.trim(), {
+				const result = await crawlWebsite(apiKey.value, url, {
 					max_pages: crawlMaxPages,
 					max_depth: crawlMaxDepth,
 					path_prefix: crawlPathPrefix.trim() || undefined
@@ -692,7 +698,7 @@
 					id="web-url"
 					type="url"
 					bind:value={webUrl}
-					placeholder="https://example.com"
+					placeholder="kiatkoding.com or https://example.com"
 					class="mt-1.5 block w-full rounded-lg border border-zinc-600 bg-zinc-700 px-3.5 py-2.5 text-sm text-zinc-100 placeholder-zinc-400 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-none"
 				/>
 			</div>

@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     ZAI_API_KEY: Optional[str] = None
     ZAI_MCP_URL: str = "https://api.z.ai/api/mcp/web_search_prime/mcp"
 
+    # Jina AI Reader (for web scraping)
+    JINA_API_KEY: Optional[str] = None
+
     # Rate Limiting
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_REQUESTS_PER_MINUTE: int = 60

@@ -1,17 +1,41 @@
-"""Web scraper service for extracting content from websites."""
+"""Web scraper service using Jina AI Reader API."""
 
 import asyncio
 import logging
 import re
-import time
 from dataclasses import dataclass
 from typing import List, Optional
 from urllib.parse import urljoin, urlparse
 
 import httpx
-import trafilatura
+
+from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Jina AI Reader API endpoint
+JINA_READER_URL = "https://r.jina.ai/"
+
+# File extensions to skip (images, media, documents, etc.)
+SKIP_EXTENSIONS = {
+    '.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.ico', '.bmp',
+    '.mp4', '.mp3', '.wav', '.avi', '.mov', '.wmv', '.flv',
+    '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+    '.zip', '.rar', '.tar', '.gz', '.7z',
+    '.css', '.js', '.json', '.xml', '.rss',
+    '.woff', '.woff2', '.ttf', '.eot', '.otf',
+}
+
+# URL patterns that are typically not crawlable pages
+SKIP_PATTERNS = [
+    r'/_next/image',          # Next.js image optimization
+    r'/image\?',              # Image resize URLs
+    r'\.(jpg|jpeg|png|gif|webp|svg|ico|bmp)',  # Image files
+    r'#',                     # Anchors
+    r'mailto:',               # Email links
+    r'tel:',                  # Phone links
+    r'javascript:',           # JavaScript links
+]
 
 
 @dataclass
@@ -34,131 +58,169 @@ class CrawlResult:
     errors: List[str]
 
 
+def normalize_url(url: str) -> str:
+    """Normalize URL - add https:// if missing."""
+    url = url.strip()
+    if not url:
+        return url
+
+    # Add https:// if no protocol specified
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+
+    return url
+
+
+def is_crawlable_url(url: str) -> bool:
+    """Check if URL is a crawlable HTML page (not an image, media, etc.)."""
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+
+    # Check file extension
+    for ext in SKIP_EXTENSIONS:
+        if path.endswith(ext):
+            return False
+
+    # Check skip patterns
+    for pattern in SKIP_PATTERNS:
+        if re.search(pattern, url, re.IGNORECASE):
+            return False
+
+    return True
+
+
+def extract_title_from_content(content: str, url: str) -> str:
+    """Extract title from content or URL."""
+    # Try to find title in content (Jina usually includes it at the top)
+    lines = content.strip().split('\n')
+    if lines:
+        first_line = lines[0].strip()
+        # Check if first line looks like a title (starts with # or is short)
+        if first_line.startswith('# '):
+            return first_line[2:].strip()
+        if len(first_line) < 100 and not first_line.startswith(('http', 'Title:', 'Date:')):
+            return first_line
+
+    # Fallback to URL path
+    parsed = urlparse(url)
+    title = parsed.path.strip('/').replace('/', ' - ') or parsed.netloc
+    # Remove common prefixes and clean up
+    title = re.sub(r'^www\.', '', title)
+    return title
+
+
 class WebScraper:
-    """Web scraper with support for single URL and recursive crawling."""
+    """Web scraper using Jina AI Reader API."""
 
     def __init__(
         self,
-        timeout: float = 30.0,
+        timeout: float = 60.0,
         delay: float = 1.0,
         max_pages: int = 50,
         max_depth: int = 3,
-        user_agent: str = "KiranaBot/1.0 (Knowledge Crawler)",
     ):
         self.timeout = timeout
-        self.delay = delay  # Delay between requests (respectful crawling)
+        self.delay = delay
         self.max_pages = max_pages
         self.max_depth = max_depth
-        self.user_agent = user_agent
-        self.headers = {
-            "User-Agent": user_agent,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
+
+        # Check if Jina API key is configured
+        self.jina_api_key = settings.JINA_API_KEY
+        if not self.jina_api_key:
+            logger.warning("[WEB_SCRAPER] JINA_API_KEY not configured. Web scraping will not work.")
+
+    def _get_headers(self) -> dict:
+        """Get headers for Jina API request."""
+        return {
+            "Authorization": f"Bearer {self.jina_api_key}",
+            "Accept": "text/plain",
         }
 
-    def _is_same_domain(self, base_url: str, target_url: str) -> bool:
-        """Check if target URL is from the same domain as base URL."""
-        base_parsed = urlparse(base_url)
-        target_parsed = urlparse(target_url)
-        return base_parsed.netloc == target_parsed.netloc
+    async def _fetch_with_jina(self, client: httpx.AsyncClient, url: str) -> tuple[Optional[str], Optional[str]]:
+        """Fetch content using Jina AI Reader API."""
+        if not self.jina_api_key:
+            return None, "JINA_API_KEY not configured"
 
-    def _normalize_url(self, base_url: str, href: str) -> Optional[str]:
-        """Normalize a URL relative to base URL."""
-        if not href:
-            return None
-
-        # Skip anchors, javascript, mailto, etc.
-        if href.startswith(('#', 'javascript:', 'mailto:', 'tel:', 'data:')):
-            return None
-
-        # Make absolute URL
-        full_url = urljoin(base_url, href)
-
-        # Parse and clean
-        parsed = urlparse(full_url)
-
-        # Only allow http/https
-        if parsed.scheme not in ('http', 'https'):
-            return None
-
-        # Remove fragment
-        clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-        if parsed.query:
-            clean_url += f"?{parsed.query}"
-
-        return clean_url
-
-    def _extract_links(self, html_content: str, base_url: str) -> List[str]:
-        """Extract all links from HTML content."""
-        links = []
-
-        # Simple regex to find href attributes (works well enough for most cases)
-        href_pattern = re.compile(r'href=["\']([^"\']+)["\']', re.IGNORECASE)
-        matches = href_pattern.findall(html_content)
-
-        for href in matches:
-            url = self._normalize_url(base_url, href)
-            if url and self._is_same_domain(base_url, url):
-                links.append(url)
-
-        return list(set(links))  # Remove duplicates
-
-    async def _fetch_page(self, client: httpx.AsyncClient, url: str) -> tuple[Optional[str], Optional[str]]:
-        """Fetch a page and return (html_content, error)."""
         try:
-            response = await client.get(url, follow_redirects=True)
+            # Jina Reader URL format: https://r.jina.ai/{url}
+            jina_url = f"{JINA_READER_URL}{url}"
+
+            response = await client.get(
+                jina_url,
+                headers=self._get_headers(),
+                follow_redirects=True,
+            )
             response.raise_for_status()
-            return response.text, None
+
+            content = response.text
+            if not content or len(content.strip()) < 50:
+                return None, "No meaningful content extracted"
+
+            return content, None
+
         except httpx.TimeoutException:
             return None, f"Timeout fetching {url}"
         except httpx.HTTPStatusError as e:
+            if e.response.status_code == 401:
+                return None, "Invalid Jina API key"
+            elif e.response.status_code == 402:
+                return None, "Jina API quota exceeded"
             return None, f"HTTP error {e.response.status_code} for {url}"
         except Exception as e:
             return None, f"Error fetching {url}: {str(e)}"
 
-    def _extract_content(self, html_content: str, url: str) -> tuple[str, str]:
-        """Extract title and main content from HTML using trafilatura."""
-        # Extract content with trafilatura
-        extracted = trafilatura.extract(
-            html_content,
-            include_comments=False,
-            include_tables=True,
-            no_fallback=False,
-            output_format='txt',
-            url=url,
-        )
+    def _extract_page_links(self, content: str, base_url: str) -> List[str]:
+        """Extract only HTML page links from markdown content, excluding images/media."""
+        links = []
+        parsed_base = urlparse(base_url)
 
-        # Extract title
-        metadata = trafilatura.baseline(html_content)
-        title = ""
-        if metadata and 'title' in metadata:
-            title = metadata['title'] or ""
+        # Match markdown links: [text](url)
+        md_pattern = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
 
-        # Fallback: try to get title from HTML
-        if not title:
-            title_match = re.search(r'<title[^>]*>([^<]+)</title>', html_content, re.IGNORECASE)
-            if title_match:
-                title = title_match.group(1).strip()
+        for match in md_pattern.finditer(content):
+            href = match.group(2)
 
-        if not title:
-            # Use URL path as title
-            parsed = urlparse(url)
-            title = parsed.path.strip('/').replace('/', ' - ') or parsed.netloc
+            # Skip if not a web URL
+            if not href.startswith(('http://', 'https://')):
+                continue
 
-        content = extracted or ""
+            # Skip non-crawlable URLs (images, media, etc.)
+            if not is_crawlable_url(href):
+                continue
 
-        return title, content
+            parsed = urlparse(href)
+
+            # Only same domain links
+            if parsed.netloc != parsed_base.netloc:
+                continue
+
+            # Clean URL (remove fragment)
+            clean = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+            if parsed.query:
+                clean += f"?{parsed.query}"
+
+            # Final check
+            if is_crawlable_url(clean):
+                links.append(clean)
+
+        return list(set(links))
 
     async def scrape_url(self, url: str) -> ScrapedPage:
-        """Scrape a single URL and extract content."""
-        logger.info("[WEB_SCRAPER] Scraping URL: %s", url)
+        """Scrape a single URL using Jina AI Reader."""
+        url = normalize_url(url)
+        logger.info("[WEB_SCRAPER] Scraping URL with Jina: %s", url)
 
-        async with httpx.AsyncClient(
-            timeout=self.timeout,
-            headers=self.headers,
-            follow_redirects=True,
-        ) as client:
-            html_content, error = await self._fetch_page(client, url)
+        if not self.jina_api_key:
+            return ScrapedPage(
+                url=url,
+                title="",
+                content="",
+                success=False,
+                error="JINA_API_KEY not configured. Please add JINA_API_KEY to your .env file.",
+            )
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            content, error = await self._fetch_with_jina(client, url)
 
             if error:
                 logger.warning("[WEB_SCRAPER] Failed to fetch %s: %s", url, error)
@@ -170,19 +232,11 @@ class WebScraper:
                     error=error,
                 )
 
-            title, content = self._extract_content(html_content, url)
+            title = extract_title_from_content(content, url)
 
-            if not content.strip():
-                logger.warning("[WEB_SCRAPER] No content extracted from %s", url)
-                return ScrapedPage(
-                    url=url,
-                    title=title,
-                    content="",
-                    success=False,
-                    error="No content could be extracted",
-                )
+            logger.info("[WEB_SCRAPER] Successfully scraped %s: %d chars, title='%s'",
+                       url, len(content), title[:50] if title else "N/A")
 
-            logger.info("[WEB_SCRAPER] Successfully scraped %s: %d chars", url, len(content))
             return ScrapedPage(
                 url=url,
                 title=title,
@@ -201,53 +255,68 @@ class WebScraper:
 
         Args:
             start_url: Starting URL to crawl
-            max_pages: Maximum number of pages to crawl (default from constructor)
-            max_depth: Maximum depth to follow links (default from constructor)
-            path_prefix: Only crawl URLs that start with this path prefix (e.g., "/blog/")
+            max_pages: Maximum number of pages to crawl
+            max_depth: Maximum depth to follow links
+            path_prefix: Only crawl URLs that start with this path prefix
 
         Returns:
             CrawlResult with all scraped pages
         """
+        start_url = normalize_url(start_url)
         max_pages = max_pages or self.max_pages
         max_depth = max_depth or self.max_depth
 
         logger.info(
-            "[WEB_SCRAPER] Starting crawl: %s (max_pages=%d, max_depth=%d)",
+            "[WEB_SCRAPER] Starting crawl with Jina: %s (max_pages=%d, max_depth=%d)",
             start_url, max_pages, max_depth
         )
+
+        if not self.jina_api_key:
+            return CrawlResult(
+                pages=[ScrapedPage(
+                    url=start_url,
+                    title="",
+                    content="",
+                    success=False,
+                    error="JINA_API_KEY not configured",
+                )],
+                total_pages=1,
+                successful_pages=0,
+                failed_pages=1,
+                errors=["JINA_API_KEY not configured"],
+            )
 
         pages: List[ScrapedPage] = []
         errors: List[str] = []
         visited: set[str] = set()
-        to_visit: List[tuple[str, int]] = [(start_url, 0)]  # (url, depth)
+        to_visit: List[tuple[str, int]] = [(start_url, 0)]
 
-        async with httpx.AsyncClient(
-            timeout=self.timeout,
-            headers=self.headers,
-            follow_redirects=True,
-        ) as client:
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
             while to_visit and len(pages) < max_pages:
                 current_url, depth = to_visit.pop(0)
 
-                # Skip if already visited
                 if current_url in visited:
+                    continue
+
+                # Skip non-crawlable URLs
+                if not is_crawlable_url(current_url):
+                    logger.debug("[WEB_SCRAPER] Skipping non-crawlable URL: %s", current_url)
                     continue
 
                 # Check path prefix if specified
                 if path_prefix:
                     parsed = urlparse(current_url)
                     if not parsed.path.startswith(path_prefix):
-                        logger.debug("[WEB_SCRAPER] Skipping %s (path prefix mismatch)", current_url)
                         continue
 
                 visited.add(current_url)
 
                 # Respectful delay
-                if pages:  # Don't delay on first request
+                if pages:
                     await asyncio.sleep(self.delay)
 
-                # Fetch page
-                html_content, error = await self._fetch_page(client, current_url)
+                # Fetch with Jina
+                content, error = await self._fetch_with_jina(client, current_url)
 
                 if error:
                     errors.append(error)
@@ -260,31 +329,21 @@ class WebScraper:
                     ))
                     continue
 
-                # Extract content
-                title, content = self._extract_content(html_content, current_url)
+                title = extract_title_from_content(content, current_url)
+                pages.append(ScrapedPage(
+                    url=current_url,
+                    title=title,
+                    content=content,
+                    success=True,
+                ))
 
-                if content.strip():
-                    pages.append(ScrapedPage(
-                        url=current_url,
-                        title=title,
-                        content=content,
-                        success=True,
-                    ))
-                    logger.info("[WEB_SCRAPER] Scraped %d/%d: %s (%d chars)",
-                               len([p for p in pages if p.success]), max_pages,
-                               current_url, len(content))
-                else:
-                    pages.append(ScrapedPage(
-                        url=current_url,
-                        title=title,
-                        content="",
-                        success=False,
-                        error="No content extracted",
-                    ))
+                logger.info("[WEB_SCRAPER] Crawled %d/%d: %s (%d chars)",
+                           len([p for p in pages if p.success]), max_pages,
+                           current_url, len(content))
 
                 # Find more links if we haven't reached max depth
                 if depth < max_depth and len(pages) < max_pages:
-                    links = self._extract_links(html_content, current_url)
+                    links = self._extract_page_links(content, current_url)
                     for link in links:
                         if link not in visited and link not in [u for u, _ in to_visit]:
                             to_visit.append((link, depth + 1))
@@ -293,7 +352,7 @@ class WebScraper:
         failed = [p for p in pages if not p.success]
 
         logger.info(
-            "[WEB_SCRAPER] Crawl complete: %d pages scraped (%d successful, %d failed)",
+            "[WEB_SCRAPER] Crawl complete: %d pages (%d successful, %d failed)",
             len(pages), len(successful), len(failed)
         )
 
@@ -308,7 +367,7 @@ class WebScraper:
 
 # Convenience functions
 async def scrape_single_url(url: str) -> ScrapedPage:
-    """Scrape a single URL."""
+    """Scrape a single URL using Jina AI Reader."""
     scraper = WebScraper()
     return await scraper.scrape_url(url)
 
@@ -319,7 +378,7 @@ async def crawl_website(
     max_depth: int = 3,
     path_prefix: Optional[str] = None,
 ) -> CrawlResult:
-    """Crawl a website."""
+    """Crawl a website using Jina AI Reader."""
     scraper = WebScraper(max_pages=max_pages, max_depth=max_depth)
     return await scraper.crawl_website(
         start_url,
