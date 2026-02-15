@@ -75,12 +75,16 @@ class EmbedConfigUpdate(BaseModel):
     save_history: bool = Field(default=True, description="Save chat history to localStorage")
     stream_mode: bool = Field(default=True, description="If true, stream responses; if false, wait for complete response")
     regenerate_token: bool = Field(default=False, description="Generate new embed token")
+    # Header settings
+    header_title: Optional[str] = Field(default=None, max_length=50, description="Header title (optional, max 50 chars)")
     # Theme settings
     theme: str = Field(default="dark", description="Theme preset: 'light' or 'dark'")
     primary_color: str = Field(default="#6366f1", description="Primary color (hex)")
     bg_color: Optional[str] = Field(default=None, description="Background color (hex, optional)")
     text_color: Optional[str] = Field(default=None, description="Text color (hex, optional)")
     font_family: Optional[str] = Field(default=None, description="Font family (optional)")
+    # Custom styling
+    custom_css_url: Optional[str] = Field(default=None, description="URL to custom CSS file for radical styling")
 
 
 class EmbedConfigResponse(BaseModel):
@@ -90,12 +94,16 @@ class EmbedConfigResponse(BaseModel):
     save_history: bool
     stream_mode: bool
     has_token: bool
+    # Header settings
+    header_title: Optional[str] = None
     # Theme settings
     theme: str = "dark"
     primary_color: str = "#6366f1"
     bg_color: Optional[str] = None
     text_color: Optional[str] = None
     font_family: Optional[str] = None
+    # Custom styling
+    custom_css_url: Optional[str] = None
 
 
 class ChannelListResponse(BaseModel):
@@ -301,6 +309,11 @@ async def configure_embed(
     config["public"] = data.public
     config["save_history"] = data.save_history
     config["stream_mode"] = data.stream_mode
+    # Header settings
+    if data.header_title:
+        config["header_title"] = data.header_title
+    elif "header_title" in config:
+        del config["header_title"]  # Remove if not provided
     # Theme settings
     config["theme"] = data.theme
     config["primary_color"] = data.primary_color
@@ -310,6 +323,11 @@ async def configure_embed(
         config["text_color"] = data.text_color
     if data.font_family:
         config["font_family"] = data.font_family
+    # Custom CSS URL for radical styling
+    if data.custom_css_url:
+        config["custom_css_url"] = data.custom_css_url
+    elif "custom_css_url" in config:
+        del config["custom_css_url"]
     channel.embed_config = config
     channel.embed_enabled = True
 
@@ -346,11 +364,13 @@ async def configure_embed(
         save_history=data.save_history,
         stream_mode=data.stream_mode,
         has_token=bool(channel.embed_token),
+        header_title=data.header_title,
         theme=data.theme,
         primary_color=data.primary_color,
         bg_color=data.bg_color,
         text_color=data.text_color,
         font_family=data.font_family,
+        custom_css_url=data.custom_css_url,
     )
 
 
@@ -404,11 +424,58 @@ async def get_embed_config(
         save_history=config.get("save_history", True),
         stream_mode=config.get("stream_mode", True),
         has_token=bool(channel.embed_token),
+        header_title=config.get("header_title"),
         theme=config.get("theme", "dark"),
         primary_color=config.get("primary_color", "#6366f1"),
         bg_color=config.get("bg_color"),
         text_color=config.get("text_color"),
         font_family=config.get("font_family"),
+        custom_css_url=config.get("custom_css_url"),
+    )
+
+
+class PublicEmbedConfig(BaseModel):
+    """Public embed config - safe to expose without authentication."""
+    save_history: bool = True
+    header_title: Optional[str] = None
+    theme: str = "dark"
+    primary_color: str = "#6366f1"
+    bg_color: Optional[str] = None
+    text_color: Optional[str] = None
+    custom_css_url: Optional[str] = None
+
+
+@router.get("/{channel_id}/embed/public", response_model=PublicEmbedConfig)
+async def get_public_embed_config(
+    channel_id: UUID,
+    db: AsyncSession = Depends(deps.get_db),
+):
+    """Get public embed configuration - no API key required.
+
+    This endpoint is used by the embed widget to fetch theme/settings.
+    Only returns safe, non-sensitive configuration.
+    """
+    result = await db.execute(
+        select(Channel).where(Channel.id == channel_id)
+    )
+    channel = result.scalar_one_or_none()
+
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    if not channel.embed_enabled:
+        raise HTTPException(status_code=403, detail="Embed not enabled for this channel")
+
+    config = channel.embed_config or {}
+
+    return PublicEmbedConfig(
+        save_history=config.get("save_history", True),
+        header_title=config.get("header_title"),
+        theme=config.get("theme", "dark"),
+        primary_color=config.get("primary_color", "#6366f1"),
+        bg_color=config.get("bg_color"),
+        text_color=config.get("text_color"),
+        custom_css_url=config.get("custom_css_url"),
     )
 
 

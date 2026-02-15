@@ -1,35 +1,122 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Chat</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #09090b; color: #e4e4e7; }
-        .container { display: flex; flex-direction: column; height: 100vh; }
-        .header { display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 1rem; border-bottom: 1px solid #27272a; }
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-color, #09090b);
+            color: var(--text-color, #e4e4e7);
+            transition: background-color 0.2s, color 0.2s;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            width: 100%;
+            height: 100%;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.5rem 1rem;
+            border-bottom: 1px solid var(--border-color, #27272a);
+            flex-shrink: 0;
+        }
         .header span { font-size: 0.875rem; font-weight: 500; }
-        .clear-btn { font-size: 0.75rem; color: #71717a; background: none; border: none; cursor: pointer; }
-        .clear-btn:hover { color: #d4d4d8; }
-        .messages { flex: 1; overflow-y: auto; padding: 1rem; }
+        .clear-btn {
+            font-size: 0.75rem;
+            color: var(--muted-color, #71717a);
+            background: none;
+            border: none;
+            cursor: pointer;
+        }
+        .clear-btn:hover { color: var(--text-color, #d4d4d8); }
+        .messages { flex: 1; overflow-y: auto; padding: 1rem; min-height: 0; }
         .empty { display: flex; height: 100%; align-items: center; justify-content: center; }
-        .empty p { font-size: 0.875rem; color: #71717a; }
-        .message-list { max-width: 28rem; margin: 0 auto; }
+        .empty p { font-size: 0.875rem; color: var(--muted-color, #71717a); }
+        .message-list { max-width: 100%; margin: 0 auto; }
         .message { margin-bottom: 1rem; display: flex; }
         .message.user { justify-content: flex-end; }
-        .message-content { max-width: 80%; padding: 0.5rem 1rem; border-radius: 1rem; font-size: 0.875rem; }
-        .message.user .message-content { background: #4f46e5; color: white; }
-        .message.assistant .message-content { background: #27272a; color: #e4e4e7; }
-        .input-area { padding: 0.75rem; border-top: 1px solid #27272a; }
-        .input-wrapper { display: flex; gap: 0.5rem; max-width: 28rem; margin: 0 auto; }
-        .input-wrapper input { flex: 1; padding: 0.5rem 0.75rem; border-radius: 0.5rem; border: 1px solid #3f3f46; background: #18181b; color: #f4f4f5; font-size: 0.875rem; }
-        .input-wrapper input:focus { outline: none; border-color: #4f46e5; }
+        .message-content {
+            max-width: 85%;
+            padding: 0.5rem 1rem;
+            border-radius: 1rem;
+            font-size: 0.875rem;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .message.user .message-content {
+            background: var(--primary-color, #4f46e5);
+            color: white;
+        }
+        .message.assistant .message-content {
+            background: var(--bubble-color, #27272a);
+            color: var(--text-color, #e4e4e7);
+        }
+
+        /* Typing indicator - no bubble, just dots */
+        .typing-indicator {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 0.5rem 0;
+        }
+        .typing-indicator .dot {
+            width: 8px;
+            height: 8px;
+            background: var(--muted-color, #71717a);
+            border-radius: 50%;
+            animation: typing-bounce 1.4s infinite ease-in-out both;
+        }
+        .typing-indicator .dot:nth-child(1) { animation-delay: -0.32s; }
+        .typing-indicator .dot:nth-child(2) { animation-delay: -0.16s; }
+        .typing-indicator .dot:nth-child(3) { animation-delay: 0s; }
+        @keyframes typing-bounce {
+            0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+            40% { transform: scale(1); opacity: 1; }
+        }
+
+        .input-area {
+            padding: 0.75rem;
+            border-top: 1px solid var(--border-color, #27272a);
+            flex-shrink: 0;
+        }
+        .input-wrapper { display: flex; gap: 0.5rem; max-width: 100%; margin: 0 auto; }
+        .input-wrapper input {
+            flex: 1;
+            padding: 0.5rem 0.75rem;
+            border-radius: 0.5rem;
+            border: 1px solid var(--border-color, #3f3f46);
+            background: var(--input-bg, #18181b);
+            color: var(--text-color, #f4f4f5);
+            font-size: 0.875rem;
+        }
+        .input-wrapper input:focus { outline: none; border-color: var(--primary-color, #4f46e5); }
         .input-wrapper input:disabled { opacity: 0.5; }
-        .input-wrapper button { padding: 0.5rem 1rem; border-radius: 0.5rem; background: #4f46e5; color: white; border: none; font-size: 0.875rem; font-weight: 500; cursor: pointer; }
+        .input-wrapper input::placeholder { color: var(--muted-color, #71717a); }
+        .input-wrapper button {
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            background: var(--primary-color, #4f46e5);
+            color: white;
+            border: none;
+            font-size: 0.875rem;
+            font-weight: 500;
+            cursor: pointer;
+        }
         .input-wrapper button:disabled { opacity: 0.5; cursor: not-allowed; }
-        .error { display: flex; height: 100vh; align-items: center; justify-content: center; color: #f87171; }
-        .loading { display: flex; height: 100vh; align-items: center; justify-content: center; color: #a1a1aa; }
+        .error { display: flex; width: 100%; height: 100%; align-items: center; justify-content: center; color: #f87171; }
+        .loading { display: flex; width: 100%; height: 100%; align-items: center; justify-content: center; color: var(--muted-color, #a1a1aa); }
     </style>
 </head>
 <body>
@@ -39,27 +126,95 @@
         // Parse channel ID from URL path: /embed/{channel_id}
         const pathParts = window.location.pathname.split('/');
         const channelId = pathParts[2];
-        const token = new URLSearchParams(window.location.search).get('token');
+        const urlParams = new URLSearchParams(window.location.search);
+        const token = urlParams.get('token');
 
-        const API_KEY = 'kirana-default-api-key-change-me';
+        // URL params for theme override
+        const urlTheme = urlParams.get('theme');
+        const urlBgColor = urlParams.get('bgColor');
+        const urlTextColor = urlParams.get('textColor');
+        const urlPrimaryColor = urlParams.get('primaryColor');
+        const urlHeaderTitle = urlParams.get('title');  // Custom header title
+        const urlCssUrl = urlParams.get('cssUrl');      // Custom CSS URL
+
         const HISTORY_KEY = `kirana_embed_history_${channelId}`;
 
         let messages = [];
         let config = null;
         let streaming = false;
 
+        // Get header title (URL param > config > default)
+        function getHeaderTitle() {
+            return urlHeaderTitle || config?.header_title || 'Chat';
+        }
+
+        // Load custom CSS if provided
+        function loadCustomCss() {
+            const cssUrl = urlCssUrl || config?.custom_css_url;
+            if (cssUrl) {
+                const link = document.createElement('link');
+                link.rel = 'stylesheet';
+                link.href = cssUrl;
+                document.head.appendChild(link);
+            }
+        }
+
+        // Theme colors
+        const themes = {
+            dark: {
+                bg: '#09090b',
+                text: '#e4e4e7',
+                muted: '#71717a',
+                border: '#27272a',
+                bubble: '#27272a',
+                input: '#18181b'
+            },
+            light: {
+                bg: '#ffffff',
+                text: '#1f2937',
+                muted: '#6b7280',
+                border: '#e5e7eb',
+                bubble: '#f3f4f6',
+                input: '#f9fafb'
+            }
+        };
+
+        function applyTheme() {
+            // URL params > config > default (dark)
+            const theme = urlTheme || config?.theme || 'dark';
+            const colors = themes[theme] || themes.dark;
+
+            // Apply colors (URL params override everything)
+            document.documentElement.style.setProperty('--bg-color', urlBgColor || config?.bg_color || colors.bg);
+            document.documentElement.style.setProperty('--text-color', urlTextColor || config?.text_color || colors.text);
+            document.documentElement.style.setProperty('--primary-color', urlPrimaryColor || config?.primary_color || '#4f46e5');
+            document.documentElement.style.setProperty('--muted-color', colors.muted);
+            document.documentElement.style.setProperty('--border-color', colors.border);
+            document.documentElement.style.setProperty('--bubble-color', colors.bubble);
+            document.documentElement.style.setProperty('--input-bg', colors.input);
+        }
+
         async function init() {
             try {
-                const resp = await fetch(`/v1/channels/${channelId}/embed`, {
-                    headers: { 'Authorization': `Bearer ${API_KEY}` }
-                });
+                // Use public endpoint - no API key required
+                const resp = await fetch(`/v1/channels/${channelId}/embed/public`);
 
                 if (!resp.ok) {
-                    showError('Embed not configured for this channel');
+                    if (resp.status === 403) {
+                        showError('Embed not enabled for this channel');
+                    } else {
+                        showError('Channel not found');
+                    }
                     return;
                 }
 
                 config = await resp.json();
+
+                // Apply theme from config
+                applyTheme();
+
+                // Load custom CSS if provided
+                loadCustomCss();
 
                 // Load history if enabled
                 if (config.save_history) {
@@ -86,28 +241,31 @@
 
             messages.push({ role: 'user', content: text.trim() });
             messages.push({ role: 'assistant', content: '' });
+            streaming = true;  // Set BEFORE render so typing indicator shows
             saveHistory();
             render();
 
-            streaming = true;
             const assistantIdx = messages.length - 1;
 
             try {
-                const url = token
-                    ? `/v1/chat/completions?embed_token=${token}`
-                    : '/v1/chat/completions';
+                // Use embed_token if available, otherwise use channel_id for public embed
+                let url;
+                if (token) {
+                    url = `/v1/chat/completions?embed_token=${token}`;
+                } else {
+                    url = `/v1/chat/completions?channel_id=${channelId}`;
+                }
 
                 const response = await fetch(url, {
                     method: 'POST',
                     headers: {
-                        'Authorization': `Bearer ${API_KEY}`,
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
                         model: 'default',
                         messages: messages.slice(0, -1),
                         stream: true,
-                        channel_id: channelId  // Pass channel to get correct personality
+                        channel_id: channelId
                     })
                 });
 
@@ -169,7 +327,7 @@
                 app.innerHTML = `
                     <div class="container">
                         <div class="header">
-                            <span>Chat</span>
+                            <span>${getHeaderTitle()}</span>
                         </div>
                         <div class="messages">
                             <div class="empty"><p>Start a conversation</p></div>
@@ -183,16 +341,34 @@
                     </div>
                 `;
             } else {
-                const msgsHtml = messages.map(m => `
-                    <div class="message ${m.role}">
-                        <div class="message-content">${escapeHtml(m.content) || (streaming && m.role === 'assistant' ? '...' : '')}</div>
-                    </div>
-                `).join('');
+                let msgsHtml = '';
+                messages.forEach((m, idx) => {
+                    if (m.content) {
+                        msgsHtml += `
+                            <div class="message ${m.role}">
+                                <div class="message-content">${escapeHtml(m.content)}</div>
+                            </div>
+                        `;
+                    }
+                });
+
+                // Show typing indicator when streaming (waiting for response)
+                if (streaming) {
+                    msgsHtml += `
+                        <div class="message assistant">
+                            <div class="typing-indicator">
+                                <span class="dot"></span>
+                                <span class="dot"></span>
+                                <span class="dot"></span>
+                            </div>
+                        </div>
+                    `;
+                }
 
                 app.innerHTML = `
                     <div class="container">
                         <div class="header">
-                            <span>Chat</span>
+                            <span>${getHeaderTitle()}</span>
                             <button class="clear-btn" id="clearBtn">Clear</button>
                         </div>
                         <div class="messages">
@@ -235,7 +411,7 @@
             // Scroll to bottom
             const msgsDiv = document.querySelector('.messages');
             if (msgsDiv) msgsDiv.scrollTop = msgsDiv.scrollHeight;
-            if (input) input.focus();
+            if (input && !streaming) input.focus();
         }
 
         function escapeHtml(text) {

@@ -2,9 +2,12 @@ import json
 import logging
 import time
 import uuid
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api import deps
@@ -51,29 +54,126 @@ async def get_stream_chunks(
     }
 
 
+async def verify_chat_auth(
+    token: Optional[HTTPAuthorizationCredentials] = Depends(
+        HTTPBearer(auto_error=False)
+    ),
+    embed_token: Optional[str] = Query(None, description="Embed token for embed access"),
+    channel_id: Optional[str] = Query(None, description="Channel ID for public embed"),
+    db: AsyncSession = Depends(deps.get_db_session),
+) -> tuple[str, bool]:
+    """Verify authentication for chat endpoint.
+
+    Supports:
+    1. API key via Authorization header - full access
+    2. Embed token via query param - access to that channel
+    3. Public embed via channel_id (no auth) - if channel has public embed
+
+    Returns (auth_value, is_embed)
+    """
+    from app.models.channel import Channel
+
+    # Try API key first
+    if token:
+        if token.credentials == settings.KIRANA_API_KEY:
+            return (token.credentials, False)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API key",
+        )
+
+    # Try embed token
+    if embed_token:
+        result = await db.execute(
+            select(Channel).where(Channel.embed_token == embed_token)
+        )
+        channel = result.scalar_one_or_none()
+
+        if not channel:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid embed token",
+            )
+
+        if not channel.embed_enabled:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Embed is not enabled for this channel",
+            )
+
+        return (embed_token, True)
+
+    # Try public embed (no auth, but channel_id must be provided and have public embed)
+    if channel_id:
+        try:
+            import uuid
+            ch_uuid = uuid.UUID(channel_id)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid channel_id format",
+            )
+
+        result = await db.execute(
+            select(Channel).where(Channel.id == ch_uuid)
+        )
+        channel = result.scalar_one_or_none()
+
+        if not channel:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Channel not found",
+            )
+
+        if not channel.embed_enabled:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Embed is not enabled for this channel",
+            )
+
+        # Check if embed is public
+        config = channel.embed_config or {}
+        if not config.get("public", True):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="This embed requires a token",
+            )
+
+        return (channel_id, True)
+
+    # No auth provided
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Authentication required (API key, embed token, or channel_id for public embed)",
+    )
+
+
 @router.post("/completions")
 async def create_chat_completion(
     request: ChatCompletionRequest,
-    api_key: str = Depends(deps.verify_api_key),
+    auth_info: tuple[str, bool] = Depends(verify_chat_auth),
     db: AsyncSession = Depends(deps.get_db_session),
     http_request: Request = None,
-    embed_token: str = Query(default=None, description="Embed token for public embed access"),
 ):
     """Chat completion endpoint - logs all requests.
 
-    For embeds, can use embed_token instead of api_key via query param.
+    Authentication:
+    - API key via Authorization header
+    - Embed token via ?embed_token= query param
+    - Public embed via ?channel_id= query param (if embed is public)
     """
+    auth_value, is_embed = auth_info
     start_time = time.time()
     client_ip = http_request.client.host if http_request else "unknown"
 
     # Log incoming request
     logger.info(
-        "[CHAT REQUEST] IP=%s Model=%s Stream=%s Messages=%d EmbedToken=%s",
+        "[CHAT REQUEST] IP=%s Model=%s Stream=%s Messages=%d IsEmbed=%s",
         client_ip,
         request.model,
         request.stream,
         len(request.messages),
-        "yes" if embed_token else "no",
+        "yes" if is_embed else "no",
     )
 
     chat_service = ChatService(db)
