@@ -256,11 +256,16 @@ async def create_chat_completion(
 @router.websocket("/ws")
 async def chat_websocket(
     websocket: WebSocket,
-    token: str = Query(default=""),
+    token: str = Query(default="", description="API key"),
+    embed_token: str = Query(default="", description="Embed token for embed access"),
+    channel_id: str = Query(default="", description="Channel ID for public embed"),
 ):
     """WebSocket chat endpoint with stream resume support.
 
-    Connect: ws://host/v1/chat/ws?token=<API_KEY>
+    Authentication (one of):
+    - API key via ?token=<API_KEY>
+    - Embed token via ?embed_token=<token>
+    - Public embed via ?channel_id=<uuid> (if embed is public)
 
     Send message:
       {"action": "chat", "data": {<ChatCompletionRequest fields>}}
@@ -274,13 +279,55 @@ async def chat_websocket(
       {"type": "stream_end"}
       {"type": "error", "message": "..."}
     """
-    # Verify API key
-    if token != settings.KIRANA_API_KEY:
-        await websocket.close(code=4001, reason="Invalid API key")
+    from app.models.channel import Channel
+
+    # Verify authentication
+    is_embed = False
+    if token and token == settings.KIRANA_API_KEY:
+        pass  # Valid API key
+    elif embed_token:
+        # Verify embed token
+        async for db in get_db():
+            result = await db.execute(
+                select(Channel).where(Channel.embed_token == embed_token)
+            )
+            channel = result.scalar_one_or_none()
+            if not channel or not channel.embed_enabled:
+                await websocket.close(code=4001, reason="Invalid embed token")
+                return
+            is_embed = True
+            break
+    elif channel_id:
+        # Verify public embed
+        try:
+            ch_uuid = uuid.UUID(channel_id)
+        except ValueError:
+            await websocket.close(code=4001, reason="Invalid channel_id")
+            return
+
+        async for db in get_db():
+            result = await db.execute(
+                select(Channel).where(Channel.id == ch_uuid)
+            )
+            channel = result.scalar_one_or_none()
+            if not channel:
+                await websocket.close(code=4001, reason="Channel not found")
+                return
+            if not channel.embed_enabled:
+                await websocket.close(code=4001, reason="Embed not enabled")
+                return
+            config = channel.embed_config or {}
+            if not config.get("public", True):
+                await websocket.close(code=4001, reason="This embed requires a token")
+                return
+            is_embed = True
+            break
+    else:
+        await websocket.close(code=4001, reason="Authentication required")
         return
 
     await websocket.accept()
-    logger.info("[WS] Client connected")
+    logger.info("[WS] Client connected (is_embed=%s)", is_embed)
 
     stream_buffer = StreamBuffer()
     current_stream_id: str | None = None

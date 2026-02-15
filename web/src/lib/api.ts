@@ -188,7 +188,8 @@ export interface ChatRequest {
 
 export async function* streamChat(
 	token: string,
-	data: ChatRequest
+	data: ChatRequest,
+	onStreamId?: (streamId: string) => void
 ): AsyncGenerator<string, void, unknown> {
 	const headers: Record<string, string> = {
 		'Content-Type': 'application/json',
@@ -242,8 +243,11 @@ export async function* streamChat(
 
 			try {
 				const parsed = JSON.parse(payload);
-				// Skip stream_id event (client already has it)
-				if (parsed.stream_id) continue;
+				// Handle stream_id event
+				if (parsed.stream_id) {
+					if (onStreamId) onStreamId(parsed.stream_id);
+					continue;
+				}
 				const content = parsed.choices?.[0]?.delta?.content;
 				if (content) {
 					yield content;
@@ -594,11 +598,13 @@ export interface EmbedConfig {
 	save_history: boolean;
 	stream_mode: boolean;
 	regenerate_token?: boolean;
+	header_title?: string;
 	theme: string;
 	primary_color: string;
 	bg_color?: string;
 	text_color?: string;
 	font_family?: string;
+	bubble_style: string;
 }
 
 export interface EmbedConfigResponse {
@@ -608,11 +614,13 @@ export interface EmbedConfigResponse {
 	save_history: boolean;
 	stream_mode: boolean;
 	has_token: boolean;
+	header_title?: string;
 	theme: string;
 	primary_color: string;
 	bg_color?: string;
 	text_color?: string;
 	font_family?: string;
+	bubble_style: string;
 }
 
 export interface ChannelsResponse {

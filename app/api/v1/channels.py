@@ -79,10 +79,12 @@ class EmbedConfigUpdate(BaseModel):
     header_title: Optional[str] = Field(default=None, max_length=50, description="Header title (optional, max 50 chars)")
     # Theme settings
     theme: str = Field(default="dark", description="Theme preset: 'light' or 'dark'")
-    primary_color: str = Field(default="#6366f1", description="Primary color (hex)")
+    primary_color: str = Field(default="#6366f1", description="Primary/accent color (hex)")
     bg_color: Optional[str] = Field(default=None, description="Background color (hex, optional)")
     text_color: Optional[str] = Field(default=None, description="Text color (hex, optional)")
     font_family: Optional[str] = Field(default=None, description="Font family (optional)")
+    # Bubble style
+    bubble_style: str = Field(default="rounded", description="Bubble shape: 'rounded', 'square', 'minimal'")
     # Custom styling
     custom_css_url: Optional[str] = Field(default=None, description="URL to custom CSS file for radical styling")
 
@@ -102,6 +104,8 @@ class EmbedConfigResponse(BaseModel):
     bg_color: Optional[str] = None
     text_color: Optional[str] = None
     font_family: Optional[str] = None
+    # Bubble style
+    bubble_style: str = "rounded"
     # Custom styling
     custom_css_url: Optional[str] = None
 
@@ -323,6 +327,8 @@ async def configure_embed(
         config["text_color"] = data.text_color
     if data.font_family:
         config["font_family"] = data.font_family
+    # Bubble style (shape)
+    config["bubble_style"] = data.bubble_style
     # Custom CSS URL for radical styling
     if data.custom_css_url:
         config["custom_css_url"] = data.custom_css_url
@@ -353,6 +359,8 @@ async def configure_embed(
         params.append(f"textColor={data.text_color.replace('#', '%23')}")
     if data.font_family:
         params.append(f"font={data.font_family.replace(' ', '+')}")
+    if data.bubble_style and data.bubble_style != "rounded":
+        params.append(f"bubble={data.bubble_style}")
 
     if params:
         embed_url += "?" + "&".join(params)
@@ -370,6 +378,7 @@ async def configure_embed(
         bg_color=data.bg_color,
         text_color=data.text_color,
         font_family=data.font_family,
+        bubble_style=data.bubble_style,
         custom_css_url=data.custom_css_url,
     )
 
@@ -413,6 +422,9 @@ async def get_embed_config(
             params.append(f"textColor={text_color.replace('#', '%23')}")
         if font_family:
             params.append(f"font={font_family.replace(' ', '+')}")
+        bubble_style = config.get("bubble_style", "rounded")
+        if bubble_style != "rounded":
+            params.append(f"bubble={bubble_style}")
 
         if params:
             embed_url += "?" + "&".join(params)
@@ -430,6 +442,7 @@ async def get_embed_config(
         bg_color=config.get("bg_color"),
         text_color=config.get("text_color"),
         font_family=config.get("font_family"),
+        bubble_style=config.get("bubble_style", "rounded"),
         custom_css_url=config.get("custom_css_url"),
     )
 
@@ -442,6 +455,7 @@ class PublicEmbedConfig(BaseModel):
     primary_color: str = "#6366f1"
     bg_color: Optional[str] = None
     text_color: Optional[str] = None
+    bubble_style: str = "rounded"
     custom_css_url: Optional[str] = None
 
 
@@ -475,6 +489,7 @@ async def get_public_embed_config(
         primary_color=config.get("primary_color", "#6366f1"),
         bg_color=config.get("bg_color"),
         text_color=config.get("text_color"),
+        bubble_style=config.get("bubble_style", "rounded"),
         custom_css_url=config.get("custom_css_url"),
     )
 

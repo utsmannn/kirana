@@ -8,6 +8,7 @@
 		deleteSession,
 		ApiError,
 		type Session,
+		type SessionMessage,
 		type SessionMessagesResponse
 	} from '$lib/api';
 	import { apiKey } from '$lib/stores.svelte';

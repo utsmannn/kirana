@@ -32,6 +32,15 @@
             flex-shrink: 0;
         }
         .header span { font-size: 0.875rem; font-weight: 500; }
+        .header .status {
+            font-size: 0.625rem;
+            padding: 0.125rem 0.375rem;
+            border-radius: 9999px;
+            margin-left: 0.5rem;
+        }
+        .status.connected { background: #22c55e20; color: #22c55e; }
+        .status.connecting { background: #eab30820; color: #eab308; }
+        .status.disconnected { background: #ef444420; color: #ef4444; }
         .clear-btn {
             font-size: 0.75rem;
             color: var(--muted-color, #71717a);
@@ -62,6 +71,30 @@
         .message.assistant .message-content {
             background: var(--bubble-color, #27272a);
             color: var(--text-color, #e4e4e7);
+        }
+
+        /* Bubble style variants */
+        /* Rounded (default) - slightly rounded corners */
+        .bubble-rounded .message-content {
+            border-radius: 1rem;
+        }
+        /* Square - sharp corners */
+        .bubble-square .message-content {
+            border-radius: 0.25rem;
+        }
+        /* Minimal - no background */
+        .bubble-minimal .message.user .message-content {
+            background: transparent;
+            color: var(--primary-color, #4f46e5);
+            font-weight: 500;
+        }
+        .bubble-minimal .message.assistant .message-content {
+            background: transparent;
+            color: var(--text-color, #e4e4e7);
+        }
+        .bubble-minimal .message-content {
+            padding-left: 0;
+            padding-right: 0;
         }
 
         /* Typing indicator - no bubble, just dots */
@@ -134,14 +167,21 @@
         const urlBgColor = urlParams.get('bgColor');
         const urlTextColor = urlParams.get('textColor');
         const urlPrimaryColor = urlParams.get('primaryColor');
-        const urlHeaderTitle = urlParams.get('title');  // Custom header title
-        const urlCssUrl = urlParams.get('cssUrl');      // Custom CSS URL
+        const urlHeaderTitle = urlParams.get('title');
+        const urlCssUrl = urlParams.get('cssUrl');
+        const urlBubbleStyle = urlParams.get('bubble');
 
         const HISTORY_KEY = `kirana_embed_history_${channelId}`;
+        const STREAM_KEY = `kirana_embed_stream_${channelId}`;
 
         let messages = [];
         let config = null;
         let streaming = false;
+        let ws = null;
+        let wsStatus = 'disconnected';  // disconnected, connecting, connected
+        let currentStreamId = null;
+        let reconnectAttempts = 0;
+        const MAX_RECONNECT = 5;
 
         // Get header title (URL param > config > default)
         function getHeaderTitle() {
@@ -180,11 +220,9 @@
         };
 
         function applyTheme() {
-            // URL params > config > default (dark)
             const theme = urlTheme || config?.theme || 'dark';
             const colors = themes[theme] || themes.dark;
 
-            // Apply colors (URL params override everything)
             document.documentElement.style.setProperty('--bg-color', urlBgColor || config?.bg_color || colors.bg);
             document.documentElement.style.setProperty('--text-color', urlTextColor || config?.text_color || colors.text);
             document.documentElement.style.setProperty('--primary-color', urlPrimaryColor || config?.primary_color || '#4f46e5');
@@ -192,42 +230,189 @@
             document.documentElement.style.setProperty('--border-color', colors.border);
             document.documentElement.style.setProperty('--bubble-color', colors.bubble);
             document.documentElement.style.setProperty('--input-bg', colors.input);
+
+            // Apply bubble style class to body
+            const bubbleStyle = urlBubbleStyle || config?.bubble_style || 'rounded';
+            document.body.className = `bubble-${bubbleStyle}`;
         }
 
-        async function init() {
-            try {
-                // Use public endpoint - no API key required
-                const resp = await fetch(`/v1/channels/${channelId}/embed/public`);
+        // WebSocket connection
+        function connectWebSocket() {
+            if (ws && ws.readyState === WebSocket.OPEN) return;
 
-                if (!resp.ok) {
-                    if (resp.status === 403) {
-                        showError('Embed not enabled for this channel');
-                    } else {
-                        showError('Channel not found');
-                    }
-                    return;
-                }
+            wsStatus = 'connecting';
+            render();
 
-                config = await resp.json();
+            // Build WebSocket URL with auth
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            let wsUrl = `${wsProtocol}//${window.location.host}/v1/chat/ws`;
 
-                // Apply theme from config
-                applyTheme();
-
-                // Load custom CSS if provided
-                loadCustomCss();
-
-                // Load history if enabled
-                if (config.save_history) {
-                    const saved = localStorage.getItem(HISTORY_KEY);
-                    if (saved) {
-                        try { messages = JSON.parse(saved); } catch { messages = []; }
-                    }
-                }
-
-                render();
-            } catch (e) {
-                showError('Failed to load embed configuration');
+            if (token) {
+                wsUrl += `?embed_token=${token}`;
+            } else {
+                wsUrl += `?channel_id=${channelId}`;
             }
+
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                wsStatus = 'connected';
+                reconnectAttempts = 0;
+                render();
+                console.log('[WS] Connected');
+
+                // Check for active stream to resume
+                checkAndResumeStream();
+            };
+
+            ws.onclose = (e) => {
+                wsStatus = 'disconnected';
+                ws = null;
+                render();
+                console.log('[WS] Disconnected:', e.code, e.reason);
+
+                // Auto reconnect if not normal close
+                if (e.code !== 1000 && reconnectAttempts < MAX_RECONNECT) {
+                    reconnectAttempts++;
+                    console.log(`[WS] Reconnecting in ${reconnectAttempts}s... (attempt ${reconnectAttempts}/${MAX_RECONNECT})`);
+                    setTimeout(connectWebSocket, reconnectAttempts * 1000);
+                }
+            };
+
+            ws.onerror = (e) => {
+                console.error('[WS] Error:', e);
+            };
+
+            ws.onmessage = (e) => {
+                try {
+                    const msg = JSON.parse(e.data);
+                    handleWsMessage(msg);
+                } catch (err) {
+                    console.error('[WS] Parse error:', err);
+                }
+            };
+        }
+
+        function handleWsMessage(msg) {
+            switch (msg.type) {
+                case 'stream_start':
+                    currentStreamId = msg.stream_id;
+                    streaming = true;
+                    // Add empty assistant message if not exists
+                    if (messages.length === 0 || messages[messages.length - 1].role !== 'assistant') {
+                        messages.push({ role: 'assistant', content: '' });
+                    }
+                    // Save stream state for resume
+                    saveStreamState();
+                    render();
+                    break;
+
+                case 'chunk':
+                    if (messages.length > 0 && messages[messages.length - 1].role === 'assistant') {
+                        messages[messages.length - 1].content += msg.content;
+                        saveHistory();
+                        render();
+                    }
+                    break;
+
+                case 'stream_end':
+                    streaming = false;
+                    currentStreamId = null;
+                    clearStreamState();
+                    saveHistory();
+                    render();
+                    break;
+
+                case 'error':
+                    console.error('[WS] Server error:', msg.message);
+                    if (messages.length > 0 && messages[messages.length - 1].role === 'assistant') {
+                        messages[messages.length - 1].content = `Error: ${msg.message}`;
+                    }
+                    streaming = false;
+                    currentStreamId = null;
+                    clearStreamState();
+                    render();
+                    break;
+            }
+        }
+
+        function sendMessage(text) {
+            if (!text.trim() || streaming) return;
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                console.error('[WS] Not connected');
+                return;
+            }
+
+            messages.push({ role: 'user', content: text.trim() });
+            saveHistory();
+            render();
+
+            // Send chat request via WebSocket (include all messages with new user message)
+            ws.send(JSON.stringify({
+                action: 'chat',
+                data: {
+                    model: 'default',
+                    messages: messages,  // All messages including the new user message
+                    stream: true,
+                    channel_id: channelId
+                }
+            }));
+        }
+
+        // Stream resume functionality
+        function saveStreamState() {
+            if (currentStreamId && streaming) {
+                localStorage.setItem(STREAM_KEY, JSON.stringify({
+                    stream_id: currentStreamId,
+                    messages: messages,
+                    timestamp: Date.now()
+                }));
+            }
+        }
+
+        function clearStreamState() {
+            localStorage.removeItem(STREAM_KEY);
+        }
+
+        function getStreamState() {
+            const saved = localStorage.getItem(STREAM_KEY);
+            if (!saved) return null;
+
+            try {
+                const state = JSON.parse(saved);
+                // Only resume if less than 5 minutes old
+                if (Date.now() - state.timestamp < 5 * 60 * 1000) {
+                    return state;
+                }
+            } catch { }
+            clearStreamState();
+            return null;
+        }
+
+        function checkAndResumeStream() {
+            const state = getStreamState();
+            if (!state || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+            console.log('[WS] Resuming stream:', state.stream_id);
+            messages = state.messages || [];
+            currentStreamId = state.stream_id;
+            streaming = true;
+            render();
+
+            // Request resume from server
+            ws.send(JSON.stringify({
+                action: 'resume',
+                stream_id: state.stream_id
+            }));
+        }
+
+        function clearHistory() {
+            messages = [];
+            currentStreamId = null;
+            streaming = false;
+            localStorage.removeItem(HISTORY_KEY);
+            clearStreamState();
+            render();
         }
 
         function saveHistory() {
@@ -236,88 +421,17 @@
             }
         }
 
-        async function sendMessage(text) {
-            if (!text.trim() || streaming) return;
-
-            messages.push({ role: 'user', content: text.trim() });
-            messages.push({ role: 'assistant', content: '' });
-            streaming = true;  // Set BEFORE render so typing indicator shows
-            saveHistory();
-            render();
-
-            const assistantIdx = messages.length - 1;
-
-            try {
-                // Use embed_token if available, otherwise use channel_id for public embed
-                let url;
-                if (token) {
-                    url = `/v1/chat/completions?embed_token=${token}`;
-                } else {
-                    url = `/v1/chat/completions?channel_id=${channelId}`;
-                }
-
-                const response = await fetch(url, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        model: 'default',
-                        messages: messages.slice(0, -1),
-                        stream: true,
-                        channel_id: channelId
-                    })
-                });
-
-                if (!response.ok) {
-                    const err = await response.json();
-                    throw new Error(err.detail || 'Request failed');
-                }
-
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder();
-                let buffer = '';
-
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-
-                    buffer += decoder.decode(value, { stream: true });
-                    const lines = buffer.split('\n');
-                    buffer = lines.pop() || '';
-
-                    for (const line of lines) {
-                        if (line.startsWith('data: ')) {
-                            const data = line.slice(6);
-                            if (data === '[DONE]') continue;
-                            try {
-                                const parsed = JSON.parse(data);
-                                const content = parsed.choices?.[0]?.delta?.content;
-                                if (content) {
-                                    messages[assistantIdx].content += content;
-                                    render();
-                                }
-                            } catch { }
-                        }
-                    }
-                }
-                saveHistory();
-            } catch (e) {
-                messages[assistantIdx].content = `Error: ${e.message}`;
-            } finally {
-                streaming = false;
-                render();
-            }
-        }
-
-        function clearHistory() {
-            messages = [];
-            localStorage.removeItem(HISTORY_KEY);
-            render();
-        }
-
         function showError(msg) {
             document.getElementById('app').innerHTML = `<div class="error">${msg}</div>`;
+        }
+
+        function getStatusBadge() {
+            const statusText = {
+                connected: 'connected',
+                connecting: 'connecting...',
+                disconnected: 'offline'
+            };
+            return `<span class="status ${wsStatus}">${statusText[wsStatus]}</span>`;
         }
 
         function render() {
@@ -327,22 +441,25 @@
                 app.innerHTML = `
                     <div class="container">
                         <div class="header">
-                            <span>${getHeaderTitle()}</span>
+                            <div>
+                                <span>${getHeaderTitle()}</span>
+                                ${getStatusBadge()}
+                            </div>
                         </div>
                         <div class="messages">
                             <div class="empty"><p>Start a conversation</p></div>
                         </div>
                         <div class="input-area">
                             <div class="input-wrapper">
-                                <input type="text" id="msgInput" placeholder="Type a message..." ${streaming ? 'disabled' : ''}>
-                                <button id="sendBtn" ${streaming ? 'disabled' : ''}>Send</button>
+                                <input type="text" id="msgInput" placeholder="Type a message..." ${streaming || wsStatus !== 'connected' ? 'disabled' : ''}>
+                                <button id="sendBtn" ${streaming || wsStatus !== 'connected' ? 'disabled' : ''}>Send</button>
                             </div>
                         </div>
                     </div>
                 `;
             } else {
                 let msgsHtml = '';
-                messages.forEach((m, idx) => {
+                messages.forEach((m) => {
                     if (m.content) {
                         msgsHtml += `
                             <div class="message ${m.role}">
@@ -352,7 +469,7 @@
                     }
                 });
 
-                // Show typing indicator when streaming (waiting for response)
+                // Show typing indicator when streaming
                 if (streaming) {
                     msgsHtml += `
                         <div class="message assistant">
@@ -368,7 +485,10 @@
                 app.innerHTML = `
                     <div class="container">
                         <div class="header">
-                            <span>${getHeaderTitle()}</span>
+                            <div>
+                                <span>${getHeaderTitle()}</span>
+                                ${getStatusBadge()}
+                            </div>
                             <button class="clear-btn" id="clearBtn">Clear</button>
                         </div>
                         <div class="messages">
@@ -376,8 +496,8 @@
                         </div>
                         <div class="input-area">
                             <div class="input-wrapper">
-                                <input type="text" id="msgInput" placeholder="Type a message..." ${streaming ? 'disabled' : ''}>
-                                <button id="sendBtn" ${streaming ? 'disabled' : ''}>Send</button>
+                                <input type="text" id="msgInput" placeholder="Type a message..." ${streaming || wsStatus !== 'connected' ? 'disabled' : ''}>
+                                <button id="sendBtn" ${streaming || wsStatus !== 'connected' ? 'disabled' : ''}>Send</button>
                             </div>
                         </div>
                     </div>
@@ -411,12 +531,52 @@
             // Scroll to bottom
             const msgsDiv = document.querySelector('.messages');
             if (msgsDiv) msgsDiv.scrollTop = msgsDiv.scrollHeight;
-            if (input && !streaming) input.focus();
+            if (input && !streaming && wsStatus === 'connected') input.focus();
         }
 
         function escapeHtml(text) {
             if (!text) return '';
             return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        async function init() {
+            try {
+                // Load config
+                const resp = await fetch(`/v1/channels/${channelId}/embed/public`);
+
+                if (!resp.ok) {
+                    if (resp.status === 403) {
+                        showError('Embed not enabled for this channel');
+                    } else {
+                        showError('Channel not found');
+                    }
+                    return;
+                }
+
+                config = await resp.json();
+
+                // Apply theme
+                applyTheme();
+
+                // Load custom CSS
+                loadCustomCss();
+
+                // Load history
+                if (config.save_history) {
+                    const saved = localStorage.getItem(HISTORY_KEY);
+                    if (saved) {
+                        try { messages = JSON.parse(saved); } catch { messages = []; }
+                    }
+                }
+
+                render();
+
+                // Connect WebSocket
+                connectWebSocket();
+
+            } catch (e) {
+                showError('Failed to load embed configuration');
+            }
         }
 
         init();

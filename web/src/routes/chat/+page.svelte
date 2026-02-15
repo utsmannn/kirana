@@ -95,44 +95,49 @@
 	// Track pending resume state for visibilitychange save
 	let pendingResume: ResumeState | null = $state(null);
 
-	onMount(async () => {
-		if (!apiKey.value) return;
+	onMount(() => {
+		async function init() {
+			if (!apiKey.value) return;
 
-		// Restore stream preference
-		const savedStream = localStorage.getItem(STREAM_STORAGE_KEY);
-		if (savedStream !== null) {
-			useStream = savedStream !== 'false';
-		}
-
-		await Promise.all([loadSessions(), loadChannels()]);
-		try {
-			const config = await getConfig(apiKey.value);
-			model = config.model || 'default';
-		} catch {
-			// config may not be available yet
-		}
-
-		// Restore session from localStorage
-		const savedId = localStorage.getItem(SESSION_STORAGE_KEY);
-		if (savedId) {
-			const session = sessions.find(s => s.id === savedId);
-			if (session) {
-				await selectSession(session);
-			} else {
-				localStorage.removeItem(SESSION_STORAGE_KEY);
+			// Restore stream preference
+			const savedStream = localStorage.getItem(STREAM_STORAGE_KEY);
+			if (savedStream !== null) {
+				useStream = savedStream !== 'false';
 			}
-		}
 
-		// Check for stream to resume
-		const resumeJson = localStorage.getItem(RESUME_STORAGE_KEY);
-		if (resumeJson) {
+			await Promise.all([loadSessions(), loadChannels()]);
 			try {
-				const resume: ResumeState = JSON.parse(resumeJson);
-				await resumeStream(resume);
+				const config = await getConfig(apiKey.value);
+				model = config.model || 'default';
 			} catch {
-				localStorage.removeItem(RESUME_STORAGE_KEY);
+				// config may not be available yet
 			}
+
+			// Restore session from localStorage
+			const savedId = localStorage.getItem(SESSION_STORAGE_KEY);
+			if (savedId) {
+				const session = sessions.find(s => s.id === savedId);
+				if (session) {
+					await selectSession(session);
+				} else {
+					localStorage.removeItem(SESSION_STORAGE_KEY);
+				}
+			}
+
+			// Check for stream to resume
+			const resumeJson = localStorage.getItem(RESUME_STORAGE_KEY);
+			if (resumeJson) {
+				try {
+					const resume: ResumeState = JSON.parse(resumeJson);
+					await resumeStream(resume);
+				} catch {
+					localStorage.removeItem(RESUME_STORAGE_KEY);
+				}
+			}
+
+			initialized = true;
 		}
+		init();
 
 		// Save pending state on page hide/refresh
 		const handleVisibilityChange = () => {
@@ -141,8 +146,6 @@
 			}
 		};
 		document.addEventListener('visibilitychange', handleVisibilityChange);
-
-		initialized = true;
 
 		return () => {
 			document.removeEventListener('visibilitychange', handleVisibilityChange);
@@ -354,10 +357,10 @@
 					stream: true,
 					stream_id: streamId,
 					session_id: activeSessionId ?? undefined
-				}, (streamId) => {
+				}, (sid: string) => {
 					// Update resume state with stream_id
 					pendingResume = {
-						stream_id: streamId,
+						stream_id: sid,
 						session_id: activeSessionId,
 						user_message: userMessage
 					};

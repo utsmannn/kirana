@@ -415,10 +415,9 @@
 				{#if tools.length > 0}
 					<div class="space-y-2">
 						{#each tools as tool}
-							{@const fn = tool.function || tool}
 							<div class="rounded-lg bg-zinc-800/50 px-4 py-3">
-								<p class="font-mono text-sm text-zinc-200">{fn.name}</p>
-								<p class="mt-0.5 text-xs text-zinc-500">{fn.description}</p>
+								<p class="font-mono text-sm text-zinc-200">{tool.name}</p>
+								<p class="mt-0.5 text-xs text-zinc-500">{tool.description}</p>
 							</div>
 						{/each}
 					</div>
