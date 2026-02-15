@@ -192,10 +192,9 @@
 				stream_mode: embedConfig.stream_mode,
 				regenerate_token: false,
 				theme: embedConfig.theme || 'dark',
-				primary_color: embedConfig.primary_color || '#6366f1',
-				bg_color: embedConfig.bg_color || '',
-				text_color: embedConfig.text_color || '',
-				font_family: embedConfig.font_family || '',
+									primary_color: embedConfig.primary_color || '#4f46e5',
+									bg_color: embedConfig.bg_color || '',
+									text_color: embedConfig.text_color || '',				font_family: embedConfig.font_family || '',
 				bubble_style: embedConfig.bubble_style || 'rounded',
 				header_title: embedConfig.header_title || ''
 			};
@@ -527,190 +526,325 @@
 	open={showEmbedModal}
 	onClose={() => (showEmbedModal = false)}
 	title="Embed Configuration"
+	size="xl"
 >
 	{#if embedLoading}
-		<div class="flex justify-center py-8">
-			<div class="h-6 w-6 animate-spin rounded-full border-2 border-indigo-500 border-t-transparent"></div>
+		<div class="flex flex-col items-center justify-center py-20">
+			<div class="h-8 w-8 animate-spin rounded-full border-2 border-indigo-500 border-t-transparent"></div>
+			<p class="mt-4 text-sm text-zinc-400 font-medium">Loading configuration...</p>
 		</div>
 	{:else}
-		<div class="flex gap-6 min-w-[800px]">
+		<div class="flex flex-col lg:flex-row gap-8 h-[650px]">
 			<!-- Left Column: Settings -->
-			<div class="w-80 shrink-0 space-y-4">
-				<!-- Embed URL -->
-				{#if embedConfig?.embed_enabled}
-					<div class="rounded-lg bg-emerald-900/30 border border-emerald-600/50 p-3">
-						<div class="flex items-center gap-2 mb-2">
-							<svg class="h-4 w-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
-							</svg>
-							<span class="text-sm font-medium text-emerald-200">Embed Enabled</span>
-						</div>
-						<div class="flex gap-2">
-							<input
-								type="text"
-								readonly
-								value={getEmbedUrl()}
-								class="flex-1 rounded bg-zinc-800 px-2 py-1.5 text-xs text-zinc-300 border border-zinc-600"
-							/>
-							<button
-								onclick={copyEmbedUrl}
-								class="rounded bg-zinc-700 px-2 py-1.5 text-xs text-zinc-300 hover:bg-zinc-600"
-							>
-								Copy
-							</button>
-						</div>
-					</div>
-				{/if}
-
-				<!-- Options -->
-				<div class="space-y-2">
-					<label class="flex items-center gap-2 cursor-pointer">
-						<input type="checkbox" bind:checked={embedForm.public} class="h-4 w-4 rounded border-zinc-600 bg-zinc-800 text-indigo-600" />
-						<span class="text-sm text-zinc-300">Public Access</span>
-					</label>
-					<label class="flex items-center gap-2 cursor-pointer">
-						<input type="checkbox" bind:checked={embedForm.save_history} class="h-4 w-4 rounded border-zinc-600 bg-zinc-800 text-indigo-600" />
-						<span class="text-sm text-zinc-300">Save History</span>
-					</label>
-					<label class="flex items-center gap-2 cursor-pointer">
-						<input type="checkbox" bind:checked={embedForm.stream_mode} class="h-4 w-4 rounded border-zinc-600 bg-zinc-800 text-indigo-600" />
-						<span class="text-sm text-zinc-300">Stream Mode</span>
-					</label>
+			<div class="w-full lg:w-80 shrink-0 flex flex-col h-full overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-zinc-700">
+				<!-- Status Section -->
+				<div class="mb-6">
 					{#if embedConfig?.embed_enabled}
-						<label class="flex items-center gap-2 cursor-pointer">
-							<input type="checkbox" bind:checked={embedForm.regenerate_token} class="h-4 w-4 rounded border-zinc-600 bg-zinc-800 text-indigo-600" />
-							<span class="text-sm text-zinc-300">Regenerate Token</span>
-						</label>
-					{/if}
-				</div>
-
-				<!-- Appearance -->
-				<div class="border-t border-zinc-700 pt-4">
-					<h4 class="text-xs font-medium text-zinc-400 mb-3 uppercase tracking-wide">Appearance</h4>
-					<div class="space-y-3">
-						<div>
-							<label class="block text-xs text-zinc-500 mb-1">Header Title</label>
-							<input type="text" bind:value={embedForm.header_title} placeholder="Chat" maxlength="50"
-								class="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm text-zinc-200 focus:border-indigo-500 focus:outline-none" />
-						</div>
-						<div class="grid grid-cols-2 gap-2">
-							<div>
-								<label class="block text-xs text-zinc-500 mb-1">Theme</label>
-								<select bind:value={embedForm.theme}
-									class="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm text-zinc-200 focus:outline-none">
-									<option value="dark">Dark</option>
-									<option value="light">Light</option>
-								</select>
+						<div class="rounded-xl bg-emerald-500/10 border border-emerald-500/20 p-4">
+							<div class="flex items-center gap-2.5 mb-3">
+								<div class="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></div>
+								<span class="text-sm font-semibold text-emerald-400 uppercase tracking-wider">Active</span>
 							</div>
-							<div>
-								<label class="block text-xs text-zinc-500 mb-1">Bubble Style</label>
-								<select bind:value={embedForm.bubble_style}
-									class="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm text-zinc-200 focus:outline-none">
-									<option value="rounded">Rounded</option>
-									<option value="square">Square</option>
-									<option value="minimal">Minimal</option>
-								</select>
+							<div class="space-y-3">
+								<div class="relative">
+									<input
+										type="text"
+										readonly
+										value={getEmbedUrl()}
+										class="w-full rounded-lg bg-zinc-900 px-3 py-2 text-xs text-zinc-400 border border-zinc-700 focus:outline-none pr-12"
+									/>
+									<button
+										onclick={copyEmbedUrl}
+										class="absolute right-1 top-1 bottom-1 px-2 rounded-md bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition-colors"
+										title="Copy URL"
+									>
+										<svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"></path>
+										</svg>
+									</button>
+								</div>
+								<p class="text-[10px] text-zinc-500 italic">Share this URL to allow users to chat with this channel.</p>
 							</div>
 						</div>
-						<div>
-							<label class="block text-xs text-zinc-500 mb-1">Primary Color</label>
-							<div class="flex gap-2">
-								<input type="color" bind:value={embedForm.primary_color} class="h-8 w-10 rounded border border-zinc-700 bg-zinc-800 cursor-pointer" />
-								<input type="text" bind:value={embedForm.primary_color} placeholder="#6366f1"
-									class="flex-1 rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm text-zinc-200 font-mono focus:outline-none" />
-							</div>
-						</div>
-					</div>
-				</div>
-
-				<!-- Actions -->
-				<div class="border-t border-zinc-700 pt-4 flex justify-between">
-					{#if embedConfig?.embed_enabled}
-						<Button variant="secondary" size="sm" onclick={handleDisableEmbed} loading={embedSaving}>Disable</Button>
 					{:else}
-						<Button variant="secondary" size="sm" onclick={handleSaveEmbed} loading={embedSaving}>Enable</Button>
+						<div class="rounded-xl bg-zinc-900 border border-zinc-800 p-4">
+							<div class="flex items-center gap-2.5 mb-2">
+								<div class="h-2 w-2 rounded-full bg-zinc-600"></div>
+								<span class="text-sm font-semibold text-zinc-500 uppercase tracking-wider">Inactive</span>
+							</div>
+							<p class="text-xs text-zinc-400">Enable embedding to get a public chat URL for this channel.</p>
+						</div>
 					{/if}
+				</div>
+
+				<!-- Settings Sections -->
+				<div class="space-y-6 flex-1">
+					<!-- General Section -->
+					<section>
+						<h4 class="text-[11px] font-bold text-zinc-500 mb-4 uppercase tracking-widest border-b border-zinc-800 pb-2">Behavior</h4>
+						<div class="space-y-4">
+							<label class="group flex items-start justify-between cursor-pointer">
+								<div class="flex flex-col">
+									<span class="text-sm text-zinc-300 group-hover:text-zinc-100 transition-colors">Public Access</span>
+									<span class="text-[10px] text-zinc-500">Allow anyone with the link to chat</span>
+								</div>
+								<input type="checkbox" bind:checked={embedForm.public} class="mt-1 h-4 w-4 rounded border-zinc-600 bg-zinc-800 text-indigo-600 focus:ring-offset-zinc-800 focus:ring-indigo-600" />
+							</label>
+							<label class="group flex items-start justify-between cursor-pointer">
+								<div class="flex flex-col">
+									<span class="text-sm text-zinc-300 group-hover:text-zinc-100 transition-colors">Save History</span>
+									<span class="text-[10px] text-zinc-500">Persist chat sessions in the database</span>
+								</div>
+								<input type="checkbox" bind:checked={embedForm.save_history} class="mt-1 h-4 w-4 rounded border-zinc-600 bg-zinc-800 text-indigo-600 focus:ring-offset-zinc-800 focus:ring-indigo-600" />
+							</label>
+							<label class="group flex items-start justify-between cursor-pointer">
+								<div class="flex flex-col">
+									<span class="text-sm text-zinc-300 group-hover:text-zinc-100 transition-colors">Stream Mode</span>
+									<span class="text-[10px] text-zinc-500">Display AI responses as they are generated</span>
+								</div>
+								<input type="checkbox" bind:checked={embedForm.stream_mode} class="mt-1 h-4 w-4 rounded border-zinc-600 bg-zinc-800 text-indigo-600 focus:ring-offset-zinc-800 focus:ring-indigo-600" />
+							</label>
+							{#if embedConfig?.embed_enabled}
+								<label class="group flex items-start justify-between cursor-pointer">
+									<div class="flex flex-col">
+										<span class="text-sm text-zinc-300 group-hover:text-zinc-100 transition-colors">Rotate Token</span>
+										<span class="text-[10px] text-zinc-500">Generates a new URL and invalidates the old one</span>
+									</div>
+									<input type="checkbox" bind:checked={embedForm.regenerate_token} class="mt-1 h-4 w-4 rounded border-zinc-600 bg-zinc-800 text-indigo-600 focus:ring-offset-zinc-800 focus:ring-indigo-600" />
+								</label>
+							{/if}
+						</div>
+					</section>
+
+					<!-- Style Section -->
+					<section>
+						<h4 class="text-[11px] font-bold text-zinc-500 mb-4 uppercase tracking-widest border-b border-zinc-800 pb-2">Customization</h4>
+						<div class="space-y-4">
+							<div>
+								<label class="block text-xs font-medium text-zinc-400 mb-1.5">Window Title</label>
+								<input type="text" bind:value={embedForm.header_title} placeholder="Chat" maxlength="50"
+									class="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition-all" />
+							</div>
+							
+							<div class="grid grid-cols-2 gap-3">
+								<div>
+									<label class="block text-xs font-medium text-zinc-400 mb-1.5">Theme</label>
+									<div class="relative">
+										<select bind:value={embedForm.theme}
+											class="w-full appearance-none rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-indigo-500 outline-none cursor-pointer">
+											<option value="dark">Dark</option>
+											<option value="light">Light</option>
+										</select>
+										<div class="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-zinc-500">
+											<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+										</div>
+									</div>
+								</div>
+								<div>
+									<label class="block text-xs font-medium text-zinc-400 mb-1.5">Bubbles</label>
+									<div class="relative">
+										<select bind:value={embedForm.bubble_style}
+											class="w-full appearance-none rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-indigo-500 outline-none cursor-pointer">
+											<option value="rounded">Rounded</option>
+											<option value="square">Square</option>
+											<option value="minimal">Minimal</option>
+										</select>
+										<div class="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-zinc-500">
+											<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+										</div>
+									</div>
+								</div>
+							</div>
+
+							<div>
+								<label class="block text-xs font-medium text-zinc-400 mb-1.5">Brand Color</label>
+								<div class="flex gap-2">
+									<div class="relative h-9 w-9 shrink-0 overflow-hidden rounded-lg border border-zinc-700 bg-zinc-900">
+										<input 
+											type="color" 
+											value={embedForm.primary_color || '#4f46e5'} 
+											oninput={(e) => embedForm.primary_color = e.currentTarget.value}
+											class="absolute -inset-2 h-14 w-14 cursor-pointer border-none bg-transparent" 
+										/>
+									</div>
+									<input type="text" bind:value={embedForm.primary_color} placeholder="#4f46e5"
+										class="flex-1 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 font-mono focus:border-indigo-500 outline-none transition-all uppercase" />
+								</div>
+							</div>
+
+							<div>
+								<label class="block text-xs font-medium text-zinc-400 mb-1.5">Background Color</label>
+								<div class="flex gap-2">
+									<div class="relative h-9 w-9 shrink-0 overflow-hidden rounded-lg border border-zinc-700 bg-zinc-900">
+										<input 
+											type="color" 
+											value={embedForm.bg_color || (embedForm.theme === 'dark' ? '#09090b' : '#ffffff')} 
+											oninput={(e) => embedForm.bg_color = e.currentTarget.value}
+											class="absolute -inset-2 h-14 w-14 cursor-pointer border-none bg-transparent" 
+										/>
+									</div>
+									<input type="text" bind:value={embedForm.bg_color} placeholder="Auto (Theme default)"
+										class="flex-1 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 font-mono focus:border-indigo-500 outline-none transition-all uppercase" />
+								</div>
+							</div>
+
+							<div>
+								<label class="block text-xs font-medium text-zinc-400 mb-1.5">Text Color</label>
+								<div class="flex gap-2">
+									<div class="relative h-9 w-9 shrink-0 overflow-hidden rounded-lg border border-zinc-700 bg-zinc-900">
+										<input 
+											type="color" 
+											value={embedForm.text_color || (embedForm.theme === 'dark' ? '#e4e4e7' : '#1f2937')} 
+											oninput={(e) => embedForm.text_color = e.currentTarget.value}
+											class="absolute -inset-2 h-14 w-14 cursor-pointer border-none bg-transparent" 
+										/>
+									</div>
+									<input type="text" bind:value={embedForm.text_color} placeholder="Auto (Theme default)"
+										class="flex-1 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 font-mono focus:border-indigo-500 outline-none transition-all uppercase" />
+								</div>
+							</div>
+						</div>
+					</section>
+				</div>
+
+				<!-- Modal Actions -->
+				<div class="mt-8 pt-6 border-t border-zinc-800 flex flex-col gap-2">
 					<div class="flex gap-2">
-						<Button variant="secondary" size="sm" onclick={() => (showEmbedModal = false)}>Cancel</Button>
+						<Button class="flex-1" variant="secondary" size="sm" onclick={() => (showEmbedModal = false)}>Cancel</Button>
 						{#if embedConfig?.embed_enabled}
-							<Button size="sm" onclick={handleSaveEmbed} loading={embedSaving}>Save</Button>
+							<Button class="flex-1" size="sm" onclick={handleSaveEmbed} loading={embedSaving}>Update</Button>
+						{:else}
+							<Button class="flex-1" size="sm" onclick={handleSaveEmbed} loading={embedSaving}>Enable</Button>
 						{/if}
 					</div>
+					{#if embedConfig?.embed_enabled}
+						<button 
+							onclick={handleDisableEmbed}
+							disabled={embedSaving}
+							class="text-xs text-red-400/70 hover:text-red-400 py-2 transition-colors disabled:opacity-50"
+						>
+							Disable Embedding
+						</button>
+					{/if}
 				</div>
 			</div>
 
 			<!-- Right Column: Preview -->
-			<div class="flex-1 flex flex-col">
-				<h4 class="text-xs font-medium text-zinc-400 mb-3 uppercase tracking-wide">Preview</h4>
+			<div class="flex-1 bg-zinc-900/50 rounded-2xl border border-zinc-800 p-8 flex flex-col items-center justify-center relative overflow-hidden group">
+				<!-- Background pattern -->
+				<div class="absolute inset-0 opacity-[0.03] pointer-events-none">
+					<div class="absolute inset-0" style="background-image: radial-gradient(#fff 1px, transparent 1px); background-size: 20px 20px;"></div>
+				</div>
+				
+				<div class="text-center mb-8 relative z-10">
+					<h4 class="text-[11px] font-bold text-zinc-500 uppercase tracking-[0.2em] mb-1">Live Preview</h4>
+					<p class="text-[10px] text-zinc-600">See how your widget appears to visitors</p>
+				</div>
+
+				<!-- Preview Container -->
 				<div
-					class="rounded-lg border overflow-hidden flex-1 flex flex-col"
+					class="w-full max-w-[400px] h-[450px] shadow-2xl rounded-2xl border flex flex-col relative z-10 transition-all duration-300"
 					style="
 						background: {embedForm.bg_color || (embedForm.theme === 'dark' ? '#09090b' : '#ffffff')};
 						color: {embedForm.text_color || (embedForm.theme === 'dark' ? '#e4e4e7' : '#1f2937')};
-						font-family: {embedForm.font_family || 'system-ui, sans-serif'};
+						font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+						border-color: {embedForm.theme === 'dark' ? '#27272a' : '#e5e7eb'};
 					"
 				>
 					<!-- Header -->
 					<div
-						class="flex items-center justify-between px-3 py-2 shrink-0"
+						class="flex items-center justify-between px-4 py-2 shrink-0"
 						style="border-bottom: 1px solid {embedForm.theme === 'dark' ? '#27272a' : '#e5e7eb'}"
 					>
-						<span class="text-sm font-medium">{embedForm.header_title || 'Chat'}</span>
-						<span class="text-xs px-2 py-0.5 rounded-full" style="background: rgba(34, 197, 94, 0.2); color: #22c55e">connected</span>
+						<div class="flex items-center">
+							<span class="text-sm font-medium truncate max-w-[150px]">{embedForm.header_title || 'Chat'}</span>
+							<span class="ml-2 text-[10px] px-1.5 py-0.5 rounded-full" style="background: rgba(34, 197, 94, 0.12); color: #22c55e">connected</span>
+						</div>
+						<button class="text-[11px] opacity-50 hover:opacity-100 transition-opacity">Clear</button>
 					</div>
+
 					<!-- Messages -->
-					<div class="p-3 space-y-2 flex-1 overflow-y-auto">
+					<div class="p-4 space-y-4 flex-1 overflow-y-auto">
 						<!-- User message -->
 						<div class="flex justify-end">
 							<div
-								class="px-3 py-1.5 max-w-[80%] text-sm text-white"
+								class="px-4 py-2 max-w-[85%] text-[13.5px] leading-relaxed text-white shadow-sm"
 								style="
-									background: {embedForm.bubble_style === 'minimal' ? 'transparent' : embedForm.primary_color};
-									border-radius: {embedForm.bubble_style === 'square' ? '0.25rem' : embedForm.bubble_style === 'minimal' ? '0' : '1rem'};
-									{embedForm.bubble_style === 'minimal' ? 'color: ' + embedForm.primary_color + '; font-weight: 500;' : ''}
+									background: {embedForm.bubble_style === 'minimal' ? 'transparent' : (embedForm.primary_color || '#4f46e5')};
+									border: {embedForm.bubble_style === 'minimal' ? '1.5px solid ' + (embedForm.primary_color || '#4f46e5') : 'none'};
+									border-radius: {embedForm.bubble_style === 'square' ? '0.375rem' : embedForm.bubble_style === 'minimal' ? '0.375rem' : '1.125rem 1.125rem 0.25rem 1.125rem'};
+									{embedForm.bubble_style === 'minimal' ? 'color: ' + (embedForm.primary_color || '#4f46e5') + '; font-weight: 600;' : ''}
 								"
 							>
-								Hello! How can I help?
+								I'd like to learn more about the features.
 							</div>
 						</div>
+
 						<!-- Assistant message -->
 						<div class="flex justify-start">
 							<div
-								class="px-3 py-1.5 max-w-[80%] text-sm"
+								class="px-4 py-2 max-w-[85%] text-[13.5px] leading-relaxed shadow-sm"
 								style="
 									background: {embedForm.bubble_style === 'minimal' ? 'transparent' : (embedForm.theme === 'dark' ? '#27272a' : '#f3f4f6')};
 									color: {embedForm.text_color || (embedForm.theme === 'dark' ? '#e4e4e7' : '#1f2937')};
-									border-radius: {embedForm.bubble_style === 'square' ? '0.25rem' : embedForm.bubble_style === 'minimal' ? '0' : '1rem'};
+									border: {embedForm.bubble_style === 'minimal' ? '1px solid ' + (embedForm.theme === 'dark' ? '#27272a' : '#e5e7eb') : 'none'};
+									border-radius: {embedForm.bubble_style === 'square' ? '0.375rem' : embedForm.bubble_style === 'minimal' ? '0.375rem' : '1.125rem 1.125rem 1.125rem 0.25rem'};
 								"
 							>
-								Hi! I'm here to assist you with any questions.
+								Hello! How can I help you today?
+							</div>
+						</div>
+						
+						<!-- Assistant typing -->
+						<div class="flex justify-start">
+							<div 
+								class="flex items-center gap-1 px-4 py-2.5 shadow-sm"
+								style="
+									background: {embedForm.bubble_style === 'minimal' ? 'transparent' : (embedForm.theme === 'dark' ? '#27272a' : '#f3f4f6')};
+									border: {embedForm.bubble_style === 'minimal' ? '1px solid ' + (embedForm.theme === 'dark' ? '#27272a' : '#e5e7eb') : 'none'};
+									border-radius: {embedForm.bubble_style === 'square' ? '0.375rem' : embedForm.bubble_style === 'minimal' ? '0.375rem' : '1.125rem 1.125rem 1.125rem 0.25rem'};
+								"
+							>
+								<div class="h-1.5 w-1.5 rounded-full bg-zinc-500 animate-bounce [animation-duration:1.4s] [animation-delay:-0.32s]"></div>
+								<div class="h-1.5 w-1.5 rounded-full bg-zinc-500 animate-bounce [animation-duration:1.4s] [animation-delay:-0.16s]"></div>
+								<div class="h-1.5 w-1.5 rounded-full bg-zinc-500 animate-bounce [animation-duration:1.4s]"></div>
 							</div>
 						</div>
 					</div>
-					<!-- Input -->
+
+					<!-- Input Area -->
 					<div
-						class="p-2 shrink-0"
+						class="p-4 shrink-0"
 						style="border-top: 1px solid {embedForm.theme === 'dark' ? '#27272a' : '#e5e7eb'}"
 					>
 						<div class="flex gap-2">
-							<input
-								type="text"
-								placeholder="Type a message..."
-								disabled
-								class="flex-1 px-3 py-1.5 rounded text-sm"
+							<div
+								class="flex-1 px-4 py-2 rounded-full border text-[13px] opacity-50"
 								style="
 									background: {embedForm.theme === 'dark' ? '#18181b' : '#f9fafb'};
-									border: 1px solid {embedForm.theme === 'dark' ? '#3f3f46' : '#e5e7eb'};
-									color: {embedForm.text_color || (embedForm.theme === 'dark' ? '#f4f4f5' : '#1f2937')};
+									border-color: {embedForm.theme === 'dark' ? '#3f3f46' : '#e5e7eb'};
 								"
-							/>
-							<button
-								class="px-3 py-1.5 rounded text-sm text-white"
-								style="background: {embedForm.primary_color}"
 							>
-								Send
-							</button>
+								Type a message...
+							</div>
+							<div
+								class="h-9 w-9 rounded-full flex items-center justify-center text-white shrink-0"
+								style="background: {embedForm.primary_color || '#4f46e5'}"
+							>
+								<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7"></path>
+								</svg>
+							</div>
 						</div>
+					</div>
+				</div>
+
+				<!-- Floating Widget Icon Hint -->
+				<div class="absolute bottom-4 right-4 animate-bounce hidden group-hover:block transition-all">
+					<div class="h-10 w-10 rounded-full shadow-lg flex items-center justify-center text-white" style="background: {embedForm.primary_color}">
+						<svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012-2v8a2 2 0 01-2 2h-5l-5 5v-5z"></path>
+						</svg>
 					</div>
 				</div>
 			</div>

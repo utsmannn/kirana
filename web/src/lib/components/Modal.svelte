@@ -4,10 +4,19 @@
 		title?: string;
 		onClose: () => void;
 		closable?: boolean;
+		size?: 'sm' | 'md' | 'lg' | 'xl' | '2xl';
 		children: import('svelte').Snippet;
 	}
 
-	let { open, title = '', onClose, closable = true, children }: Props = $props();
+	let { open, title = '', onClose, closable = true, size = 'md', children }: Props = $props();
+
+	const sizeClasses = {
+		sm: 'max-w-md',
+		md: 'max-w-lg',
+		lg: 'max-w-2xl',
+		xl: 'max-w-4xl',
+		'2xl': 'max-w-6xl'
+	};
 
 	function handleKeydown(e: KeyboardEvent) {
 		if (!closable) return;
@@ -37,7 +46,7 @@
 			role="dialog"
 			aria-modal="true"
 			aria-label={title || 'Dialog'}
-			class="relative w-full max-w-lg rounded-xl border border-zinc-700 bg-zinc-800 shadow-2xl"
+			class="relative w-full {sizeClasses[size]} rounded-xl border border-zinc-700 bg-zinc-800 shadow-2xl"
 			onkeydown={handleKeydown}
 		>
 			{#if title}
