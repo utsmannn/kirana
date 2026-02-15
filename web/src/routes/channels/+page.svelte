@@ -78,9 +78,9 @@
 		loading = true;
 		try {
 			const [providersResult, channelsResult, toolsResult] = await Promise.all([
-				getProviders(apiKey.value),
-				getChannels(apiKey.value).catch(() => ({ channels: [], default_channel: null })),
-				getTools(apiKey.value).catch(() => ({ tools: [] }))
+				getProviders(apiKey.value ?? undefined),
+				getChannels(apiKey.value ?? undefined).catch(() => ({ channels: [], default_channel: null })),
+				getTools(apiKey.value ?? undefined).catch(() => ({ tools: [] }))
 			]);
 
 			providers = providersResult.providers || [];
@@ -128,10 +128,10 @@
 			};
 
 			if (editingChannel) {
-				await updateChannel(apiKey.value, editingChannel.id, data);
+				await updateChannel(editingChannel.id, data, apiKey.value ?? undefined);
 				showToast('Channel updated', 'success');
 			} else {
-				await createChannel(apiKey.value, data);
+				await createChannel(data, apiKey.value ?? undefined);
 				showToast('Channel created', 'success');
 			}
 			showChannelModal = false;
@@ -156,7 +156,7 @@
 		if (!confirm(`Delete channel "${channel.name}"?`)) return;
 
 		try {
-			await deleteChannel(apiKey.value, channel.id);
+			await deleteChannel(channel.id, apiKey.value ?? undefined);
 			showToast('Channel deleted', 'success');
 			await loadData();
 		} catch (err) {
@@ -169,7 +169,7 @@
 	async function handleSetDefaultChannel(channel: Channel) {
 		if (!apiKey.value) return;
 		try {
-			await setDefaultChannel(apiKey.value, channel.id);
+			await setDefaultChannel(channel.id, apiKey.value ?? undefined);
 			showToast(`"${channel.name}" is now default channel`, 'success');
 			await loadData();
 		} catch (err) {
@@ -185,7 +185,7 @@
 		embedLoading = true;
 		showEmbedModal = true;
 		try {
-			embedConfig = await getEmbedConfig(apiKey.value, channel.id);
+			embedConfig = await getEmbedConfig(channel.id, apiKey.value ?? undefined);
 			embedForm = {
 				public: embedConfig.public,
 				save_history: embedConfig.save_history,
@@ -223,7 +223,7 @@
 		if (!apiKey.value || !embedChannel) return;
 		embedSaving = true;
 		try {
-			embedConfig = await configureEmbed(apiKey.value, embedChannel.id, embedForm);
+			embedConfig = await configureEmbed(embedChannel.id, embedForm, apiKey.value ?? undefined);
 			showToast('Embed configuration saved', 'success');
 		} catch (err) {
 			if (err instanceof ApiError) {
@@ -241,7 +241,7 @@
 		if (!confirm('Disable embed for this channel?')) return;
 		embedSaving = true;
 		try {
-			await disableEmbed(apiKey.value, embedChannel.id);
+			await disableEmbed(embedChannel.id, apiKey.value ?? undefined);
 			embedConfig = null;
 			showToast('Embed disabled', 'success');
 		} catch (err) {

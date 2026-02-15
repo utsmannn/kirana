@@ -190,7 +190,7 @@
 		showSessions = false;
 
 		try {
-			const resp = await getSessionMessages(apiKey.value, session.id);
+			const resp = await getSessionMessages(session.id, apiKey.value ?? undefined);
 			messages = (resp.messages || []).map((m: SessionMessage) => ({
 				role: m.role as 'user' | 'assistant',
 				content: m.content
@@ -212,7 +212,7 @@
 				name: sessionName.trim(),
 				channel_id: selectedChannelId || undefined
 			};
-			const session = await createSession(apiKey.value, sessionData);
+			const session = await createSession(sessionData, apiKey.value ?? undefined);
 			sessions = [session, ...sessions];
 			currentSessionId = session.id;
 			messages = [];
@@ -249,7 +249,7 @@
 			if (resume.session_id) {
 				currentSessionId = resume.session_id;
 				try {
-					const resp = await getSessionMessages(apiKey.value, resume.session_id);
+					const resp = await getSessionMessages(resume.session_id, apiKey.value ?? undefined);
 					const loaded = (resp.messages || []).map((m: SessionMessage) => ({
 						role: m.role as 'user' | 'assistant',
 						content: m.content
@@ -282,7 +282,7 @@
 
 			while (!done && retries < 3) {
 				try {
-					const result = await getStreamChunks(apiKey.value, resume.stream_id, offset);
+					const result = await getStreamChunks(resume.stream_id, apiKey.value ?? undefined, offset);
 					retries = 0;
 
 					for (const chunk of result.chunks) {
@@ -351,13 +351,13 @@
 
 		try {
 			if (useStream) {
-				const gen = streamChat(apiKey.value, {
+				const gen = streamChat({
 					model: model || 'default',
 					messages: apiMessages,
 					stream: true,
 					stream_id: streamId,
 					session_id: activeSessionId ?? undefined
-				}, (sid: string) => {
+				}, apiKey.value ?? undefined, (sid: string) => {
 					// Update resume state with stream_id
 					pendingResume = {
 						stream_id: sid,
@@ -374,12 +374,12 @@
 					};
 				}
 			} else {
-				const response = await sendChat(apiKey.value, {
+				const response = await sendChat({
 					model: model || 'default',
 					messages: apiMessages,
 					stream: false,
 					session_id: activeSessionId ?? undefined
-				});
+				}, apiKey.value ?? undefined);
 
 				const content = response.choices?.[0]?.message?.content || '';
 				messages[assistantIdx] = { role: 'assistant', content };

@@ -54,7 +54,7 @@ SUPPORTED_IMAGE_TYPES = {
 )
 async def create_knowledge(
     knowledge_in: KnowledgeCreate,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db_session),
 ):
     knowledge = Knowledge(
@@ -76,7 +76,7 @@ async def list_knowledge(
     search: Optional[str] = None,
     content_type: Optional[str] = None,
     is_active: Optional[bool] = None,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db_session),
 ):
     query = select(Knowledge)
@@ -121,7 +121,7 @@ async def list_knowledge(
 @router.get("/{knowledge_id}", response_model=KnowledgeResponse)
 async def get_knowledge(
     knowledge_id: uuid.UUID,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db_session),
 ):
     result = await db.execute(
@@ -137,7 +137,7 @@ async def get_knowledge(
 async def update_knowledge(
     knowledge_id: uuid.UUID,
     knowledge_in: KnowledgeUpdate,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db_session),
 ):
     result = await db.execute(
@@ -162,7 +162,7 @@ async def update_knowledge(
 @router.delete("/{knowledge_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_knowledge(
     knowledge_id: uuid.UUID,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db_session),
 ):
     result = await db.execute(
@@ -185,7 +185,7 @@ async def delete_knowledge(
 async def upload_knowledge_file(
     file: UploadFile = File(..., description="File to upload (PDF, DOCX, XLSX, PPTX, images, etc.)"),
     title: Optional[str] = Form(None, description="Title for the knowledge item"),
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db_session),
 ):
     """Upload a file and create knowledge entry with extracted text."""
@@ -679,7 +679,7 @@ Format output:
 @router.post("/scrape-web", response_model=WebScrapeResponse, status_code=status.HTTP_201_CREATED)
 async def scrape_web_url(
     request: WebScrapeRequest,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db_session),
 ):
     """Scrape a single URL and create knowledge entry."""
@@ -739,7 +739,7 @@ async def scrape_web_url(
 @router.post("/crawl-web", response_model=WebCrawlResponse, status_code=status.HTTP_201_CREATED)
 async def crawl_web_site(
     request: WebCrawlRequest,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db_session),
 ):
     """Crawl a website and create ONE combined knowledge entry with all pages."""

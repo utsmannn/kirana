@@ -117,7 +117,7 @@ class ChannelListResponse(BaseModel):
 
 @router.get("/", response_model=ChannelListResponse)
 async def list_channels(
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db),
 ):
     """List all channels."""
@@ -143,7 +143,7 @@ async def list_channels(
 @router.post("/", response_model=ChannelResponse, status_code=status.HTTP_201_CREATED)
 async def create_channel(
     data: ChannelCreate,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db),
 ):
     """Create a new channel."""
@@ -173,7 +173,7 @@ async def create_channel(
 @router.get("/{channel_id}", response_model=ChannelResponse)
 async def get_channel(
     channel_id: UUID,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db),
 ):
     """Get a specific channel."""
@@ -194,7 +194,7 @@ async def get_channel(
 async def update_channel(
     channel_id: UUID,
     data: ChannelUpdate,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db),
 ):
     """Update a channel."""
@@ -233,7 +233,7 @@ async def update_channel(
 @router.delete("/{channel_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_channel(
     channel_id: UUID,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db),
 ):
     """Delete a channel. Cannot delete default channel."""
@@ -254,7 +254,7 @@ async def delete_channel(
 @router.post("/{channel_id}/set-default", response_model=ChannelResponse)
 async def set_default_channel(
     channel_id: UUID,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db),
 ):
     """Set a channel as default."""
@@ -291,7 +291,7 @@ async def set_default_channel(
 async def configure_embed(
     channel_id: UUID,
     data: EmbedConfigUpdate,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db),
 ):
     """Configure embed settings for a channel."""
@@ -386,7 +386,7 @@ async def configure_embed(
 @router.get("/{channel_id}/embed", response_model=EmbedConfigResponse)
 async def get_embed_config(
     channel_id: UUID,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db),
 ):
     """Get embed configuration for a channel."""
@@ -497,7 +497,7 @@ async def get_public_embed_config(
 @router.delete("/{channel_id}/embed", status_code=status.HTTP_204_NO_CONTENT)
 async def disable_embed(
     channel_id: UUID,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db),
 ):
     """Disable embed for a channel."""

@@ -68,9 +68,9 @@
 		loading = true;
 		try {
 			const [providersResult, channelsResult, toolsResult] = await Promise.all([
-				getProviders(apiKey.value),
-				getChannels(apiKey.value).catch(() => ({ channels: [], default_channel: null })),
-				getTools(apiKey.value).catch(() => ({ tools: [] }))
+				getProviders(apiKey.value ?? undefined),
+				getChannels(apiKey.value ?? undefined).catch(() => ({ channels: [], default_channel: null })),
+				getTools(apiKey.value ?? undefined).catch(() => ({ tools: [] }))
 			]);
 
 			providers = providersResult.providers || [];
@@ -116,10 +116,10 @@
 			};
 
 			if (editingProvider) {
-				await updateProvider(apiKey.value, editingProvider.id, data);
+				await updateProvider(editingProvider.id, data, apiKey.value ?? undefined);
 				showToast('Provider updated', 'success');
 			} else {
-				await createProvider(apiKey.value, data);
+				await createProvider(data, apiKey.value ?? undefined);
 				showToast('Provider created', 'success');
 			}
 			showProviderModal = false;
@@ -144,7 +144,7 @@
 		if (!confirm(`Delete provider "${provider.name}"?`)) return;
 
 		try {
-			await deleteProvider(apiKey.value, provider.id);
+			await deleteProvider(provider.id, apiKey.value ?? undefined);
 			showToast('Provider deleted', 'success');
 			await loadData();
 		} catch (err) {
@@ -157,7 +157,7 @@
 	async function handleActivateProvider(provider: Provider) {
 		if (!apiKey.value) return;
 		try {
-			await activateProvider(apiKey.value, provider.id);
+			await activateProvider(provider.id, apiKey.value ?? undefined);
 			showToast(`"${provider.name}" is now active`, 'success');
 			await loadData();
 		} catch (err) {
@@ -196,10 +196,10 @@
 			};
 
 			if (editingChannel) {
-				await updateChannel(apiKey.value, editingChannel.id, data);
+				await updateChannel(editingChannel.id, data, apiKey.value ?? undefined);
 				showToast('Channel updated', 'success');
 			} else {
-				await createChannel(apiKey.value, data);
+				await createChannel(data, apiKey.value ?? undefined);
 				showToast('Channel created', 'success');
 			}
 			showChannelModal = false;
@@ -224,7 +224,7 @@
 		if (!confirm(`Delete channel "${channel.name}"?`)) return;
 
 		try {
-			await deleteChannel(apiKey.value, channel.id);
+			await deleteChannel(channel.id, apiKey.value ?? undefined);
 			showToast('Channel deleted', 'success');
 			await loadData();
 		} catch (err) {
@@ -237,7 +237,7 @@
 	async function handleSetDefaultChannel(channel: Channel) {
 		if (!apiKey.value) return;
 		try {
-			await setDefaultChannel(apiKey.value, channel.id);
+			await setDefaultChannel(channel.id, apiKey.value ?? undefined);
 			showToast(`"${channel.name}" is now default channel`, 'success');
 			await loadData();
 		} catch (err) {

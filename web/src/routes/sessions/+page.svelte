@@ -91,7 +91,7 @@
 				name: newSessionName.trim(),
 				channel_id: selectedChannelId || undefined
 			};
-			const session = await createSession(apiKey.value, sessionData);
+			const session = await createSession(sessionData, apiKey.value ?? undefined);
 			showToast('Session created', 'success');
 			showCreateModal = false;
 			newSessionName = '';
@@ -122,7 +122,7 @@
 
 		deleting = true;
 		try {
-			await deleteSession(apiKey.value, deleteTarget.id);
+			await deleteSession(deleteTarget.id, apiKey.value ?? undefined);
 			showToast('Session deleted', 'success');
 			deleteTarget = null;
 			await loadSessions();

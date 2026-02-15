@@ -1,10 +1,11 @@
-from typing import Optional
+from typing import Optional, Tuple
 
 from fastapi import Depends, HTTPException, Query, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.admin import verify_admin_token
 from app.config import settings
 from app.db.session import get_db
 
@@ -117,3 +118,46 @@ async def verify_api_key_or_embed_token(
 async def get_db_session(db: AsyncSession = Depends(get_db)) -> AsyncSession:
     """Get database session."""
     return db
+
+
+async def verify_api_key_or_admin_token(
+    token: Optional[HTTPAuthorizationCredentials] = Security(
+        HTTPBearer(auto_error=False)
+    ),
+    api_key: Optional[str] = Query(None, description="API key (alternative to header)"),
+) -> Tuple[str, str]:
+    """
+    Verify either API key or admin token.
+
+    Returns tuple of (auth_value, auth_type) where:
+    - auth_value is the API key or admin token
+    - auth_type is 'api_key' or 'admin_token'
+
+    This allows admin panel to use admin token (from login) while
+    external API calls use the KIRANA_API_KEY.
+    """
+    # Get token from header or query param
+    cred = None
+    if token:
+        cred = token.credentials
+    elif api_key:
+        cred = api_key
+
+    if not cred:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required (API key or admin token)",
+        )
+
+    # Try API key first
+    if cred == settings.KIRANA_API_KEY:
+        return (cred, "api_key")
+
+    # Try admin token
+    if verify_admin_token(cred):
+        return (cred, "admin_token")
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid API key or admin token",
+    )

@@ -12,7 +12,7 @@ router = APIRouter()
 
 @router.get("/")
 async def get_usage(
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db)
 ):
     """Get global usage stats for the last 30 days."""

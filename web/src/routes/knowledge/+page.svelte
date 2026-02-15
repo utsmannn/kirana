@@ -61,7 +61,7 @@
 
 	// Helper to build file URL with auth
 	function getFileUrl(itemId: string): string {
-		return `/v1/knowledge/${itemId}/download?api_key=${encodeURIComponent(apiKey.value)}`;
+		return `/v1/knowledge/${itemId}/download?api_key=${encodeURIComponent(apiKey.value ?? '')}`;
 	}
 
 	const modalTitle = $derived(editing ? 'Edit Knowledge Entry' : 'New Knowledge Entry');
@@ -161,7 +161,7 @@
 		}
 
 		try {
-			await uploadKnowledgeFile(apiKey.value, selectedFile, formTitle.trim() || undefined);
+			await uploadKnowledgeFile(selectedFile, apiKey.value ?? undefined, formTitle.trim() || undefined);
 			showToast('File uploaded successfully', 'success');
 			modalOpen = false;
 			selectedFile = null;
@@ -206,7 +206,7 @@
 
 		try {
 			if (crawlMode === 'single') {
-				const result = await scrapeWebUrl(apiKey.value, url);
+				const result = await scrapeWebUrl(url, apiKey.value ?? undefined);
 				if (result.success) {
 					showToast(`Scraped: ${result.title}`, 'success');
 					modalOpen = false;
@@ -216,7 +216,7 @@
 					showToast(result.error || 'Failed to scrape URL', 'error');
 				}
 			} else {
-				const result = await crawlWebsite(apiKey.value, url, {
+				const result = await crawlWebsite(url, apiKey.value ?? undefined, {
 					max_pages: crawlMaxPages,
 					max_depth: crawlMaxDepth,
 					path_prefix: crawlPathPrefix.trim() || undefined
@@ -269,17 +269,17 @@
 		saving = true;
 		try {
 			if (editing) {
-				await updateKnowledge(apiKey.value, editing.id, {
+				await updateKnowledge(editing.id, {
 					title: formTitle.trim(),
 					content: formContent.trim()
-				});
+				}, apiKey.value ?? undefined);
 				showToast('Entry updated', 'success');
 			} else {
-				await createKnowledge(apiKey.value, {
+				await createKnowledge({
 					title: formTitle.trim(),
 					content: formContent.trim(),
 					content_type: formContentType
-				});
+				}, apiKey.value ?? undefined);
 				showToast('Entry created', 'success');
 			}
 			modalOpen = false;
@@ -302,7 +302,7 @@
 
 		deleting = true;
 		try {
-			await deleteKnowledge(apiKey.value, deleteTarget.id);
+			await deleteKnowledge(deleteTarget.id, apiKey.value ?? undefined);
 			showToast('Entry deleted', 'success');
 			deleteTarget = null;
 			await loadItems();

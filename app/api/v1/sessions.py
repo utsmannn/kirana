@@ -23,7 +23,7 @@ router = APIRouter()
 @router.post("/", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
 async def create_session(
     session_in: SessionCreate,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db_session),
 ):
     # Determine channel_id
@@ -52,7 +52,7 @@ async def list_sessions(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     is_active: Optional[bool] = None,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db_session),
 ):
     query = select(Session)
@@ -85,7 +85,7 @@ async def list_sessions(
 @router.get("/{session_id}", response_model=SessionResponse)
 async def get_session(
     session_id: uuid.UUID,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db_session),
 ):
     result = await db.execute(
@@ -101,7 +101,7 @@ async def get_session(
 async def update_session(
     session_id: uuid.UUID,
     session_in: SessionUpdate,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db_session),
 ):
     result = await db.execute(
@@ -126,7 +126,7 @@ async def update_session(
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_session(
     session_id: uuid.UUID,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db_session),
 ):
     result = await db.execute(
@@ -146,7 +146,7 @@ async def get_session_messages(
     session_id: uuid.UUID,
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=200),
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db_session),
 ):
     # Verify session exists

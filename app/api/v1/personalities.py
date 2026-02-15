@@ -11,7 +11,7 @@ router = APIRouter()
 
 @router.get("/", response_model=PersonalityListResponse)
 async def list_personalities(
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db)
 ):
     """List all personality templates."""
@@ -27,7 +27,7 @@ async def list_personalities(
 @router.get("/{slug}", response_model=PersonalityResponse)
 async def get_personality(
     slug: str,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db)
 ):
     """Get a specific personality template."""

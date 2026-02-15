@@ -31,8 +31,8 @@
 		loading = true;
 		try {
 			const [sess, msgsResp] = await Promise.all([
-				getSession(apiKey.value, sessionId),
-				getSessionMessages(apiKey.value, sessionId)
+				getSession(sessionId, apiKey.value ?? undefined),
+				getSessionMessages(sessionId, apiKey.value ?? undefined)
 			]);
 			session = sess;
 			messages = msgsResp.messages || [];
@@ -50,7 +50,7 @@
 
 		deleting = true;
 		try {
-			await deleteSession(apiKey.value, sessionId);
+			await deleteSession(sessionId, apiKey.value ?? undefined);
 			showToast('Session deleted', 'success');
 			goto(`${base}/sessions`);
 		} catch (err) {

@@ -41,7 +41,7 @@
 	async function loadUsage() {
 		loadingUsage = true;
 		try {
-			usage = await getUsage(apiKey.value);
+			usage = await getUsage();
 		} catch {
 			// usage may not be available
 		} finally {
@@ -50,6 +50,7 @@
 	}
 
 	async function copyApiKey() {
+		if (!apiKey.value) return;
 		try {
 			await navigator.clipboard.writeText(apiKey.value);
 		} catch {
@@ -67,20 +68,26 @@
 	<!-- API Key Card -->
 	<div class="mb-6 rounded-xl border border-zinc-800 bg-zinc-900 p-6">
 		<h2 class="text-sm font-medium text-zinc-400">API Key</h2>
-		<div class="mt-3 flex items-center gap-3">
-			<code class="flex-1 rounded-lg bg-zinc-950 px-4 py-3 font-mono text-sm text-zinc-300">
-				{apiKey.value}
-			</code>
-			<button
-				onclick={copyApiKey}
-				class="rounded-lg bg-zinc-800 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-700"
-			>
-				Copy
-			</button>
-		</div>
-		<p class="mt-2 text-xs text-zinc-500">
-			Use this key in your Authorization header: <code>Bearer {apiKey.value}</code>
-		</p>
+		{#if apiKey.value}
+			<div class="mt-3 flex items-center gap-3">
+				<code class="flex-1 rounded-lg bg-zinc-950 px-4 py-3 font-mono text-sm text-zinc-300">
+					{apiKey.value}
+				</code>
+				<button
+					onclick={copyApiKey}
+					class="rounded-lg bg-zinc-800 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-700"
+				>
+					Copy
+				</button>
+			</div>
+			<p class="mt-2 text-xs text-zinc-500">
+				Use this key in your Authorization header: <code>Bearer {apiKey.value}</code>
+			</p>
+		{:else}
+			<p class="mt-3 text-sm text-zinc-500">
+				API key will be displayed after login.
+			</p>
+		{/if}
 	</div>
 
 	<!-- Usage stats -->

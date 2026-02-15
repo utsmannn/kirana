@@ -1,6 +1,6 @@
 import { goto } from '$app/navigation';
 import { browser } from '$app/environment';
-import { adminToken, apiKey } from './stores.svelte';
+import { adminToken, apiKey, getAuthToken } from './stores.svelte';
 
 const API_BASE = '/v1';
 
@@ -20,7 +20,7 @@ function handleUnauthorized() {
 	if (!browser) return;
 	// Clear auth state
 	adminToken.value = null;
-	apiKey.value = '';
+	apiKey.value = null;
 	// Redirect to login
 	goto('/login');
 }
@@ -32,8 +32,10 @@ async function request<T>(
 	const { token, ...fetchOptions } = options;
 	const headers = new Headers(fetchOptions.headers);
 
-	if (token) {
-		headers.set('Authorization', `Bearer ${token}`);
+	// Use provided token, or fall back to getAuthToken()
+	const authToken = token || getAuthToken();
+	if (authToken) {
+		headers.set('Authorization', `Bearer ${authToken}`);
 	}
 
 	if (fetchOptions.body && typeof fetchOptions.body === 'string') {
@@ -97,8 +99,18 @@ export function adminLogin(password: string): Promise<AdminLoginResponse> {
 	});
 }
 
-export function adminVerify(token: string): Promise<{ status: string }> {
+export function adminVerify(token?: string): Promise<{ status: string }> {
 	return request('/admin/verify', { token });
+}
+
+export interface AdminConfigResponse {
+	api_key: string;
+	app_name: string;
+	app_env: string;
+}
+
+export function getAdminConfig(token?: string): Promise<AdminConfigResponse> {
+	return request('/admin/config', { token });
 }
 
 // ---------- Clients ----------
@@ -119,7 +131,7 @@ export function createClient(name: string, email: string): Promise<Client> {
 	});
 }
 
-export function getClientMe(token: string): Promise<Client> {
+export function getClientMe(token?: string): Promise<Client> {
 	return request('/clients/me', { token });
 }
 
@@ -138,11 +150,11 @@ export interface AppConfig {
 	[key: string]: unknown;
 }
 
-export function getConfig(token: string): Promise<AppConfig> {
+export function getConfig(token?: string): Promise<AppConfig> {
 	return request('/config/', { token });
 }
 
-export function updateConfig(token: string, data: Partial<AppConfig>): Promise<AppConfig> {
+export function updateConfig(data: Partial<AppConfig>, token?: string): Promise<AppConfig> {
 	return request('/config/', {
 		method: 'PATCH',
 		token,
@@ -163,11 +175,11 @@ export interface PersonalitiesResponse {
 	templates: Personality[];
 }
 
-export function getPersonalities(token: string): Promise<PersonalitiesResponse> {
+export function getPersonalities(token?: string): Promise<PersonalitiesResponse> {
 	return request('/personalities/', { token });
 }
 
-export function getPersonality(token: string, slug: string): Promise<Personality> {
+export function getPersonality(slug: string, token?: string): Promise<Personality> {
 	return request(`/personalities/${slug}`, { token });
 }
 
@@ -187,13 +199,19 @@ export interface ChatRequest {
 }
 
 export async function* streamChat(
-	token: string,
 	data: ChatRequest,
+	token?: string,
 	onStreamId?: (streamId: string) => void
 ): AsyncGenerator<string, void, unknown> {
+	// Use provided token, or fall back to getAuthToken()
+	const authToken = token || getAuthToken();
+	if (!authToken) {
+		throw new ApiError(401, 'No authentication token available');
+	}
+
 	const headers: Record<string, string> = {
 		'Content-Type': 'application/json',
-		Authorization: `Bearer ${token}`
+		Authorization: `Bearer ${authToken}`
 	};
 
 	const response = await fetch(`${API_BASE}/chat/completions`, {
@@ -260,8 +278,8 @@ export async function* streamChat(
 }
 
 export function sendChat(
-	token: string,
-	data: ChatRequest
+	data: ChatRequest,
+	token?: string
 ): Promise<{ choices: { message: ChatMessage }[] }> {
 	return request('/chat/completions', {
 		method: 'POST',
@@ -279,8 +297,8 @@ export interface StreamChunksResponse {
 }
 
 export function getStreamChunks(
-	token: string,
 	streamId: string,
+	token?: string,
 	offset = 0
 ): Promise<StreamChunksResponse> {
 	return request(`/chat/stream/${streamId}?offset=${offset}`, { token });
@@ -306,14 +324,14 @@ export interface PaginatedResponse<T> {
 }
 
 export function getSessions(
-	token: string,
+	token?: string,
 	page = 1,
 	limit = 20
 ): Promise<PaginatedResponse<Session>> {
 	return request(`/sessions/?page=${page}&limit=${limit}`, { token });
 }
 
-export function getSession(token: string, id: string): Promise<Session> {
+export function getSession(id: string, token?: string): Promise<Session> {
 	return request(`/sessions/${id}`, { token });
 }
 
@@ -322,7 +340,7 @@ export interface SessionCreate {
 	channel_id?: string;
 }
 
-export function createSession(token: string, data: string | SessionCreate): Promise<Session> {
+export function createSession(data: string | SessionCreate, token?: string): Promise<Session> {
 	const body = typeof data === 'string' ? { name: data } : data;
 	return request('/sessions/', {
 		method: 'POST',
@@ -331,7 +349,7 @@ export function createSession(token: string, data: string | SessionCreate): Prom
 	});
 }
 
-export function deleteSession(token: string, id: string): Promise<void> {
+export function deleteSession(id: string, token?: string): Promise<void> {
 	return request(`/sessions/${id}`, { method: 'DELETE', token });
 }
 
@@ -350,7 +368,7 @@ export interface SessionMessagesResponse {
 	limit: number;
 }
 
-export function getSessionMessages(token: string, id: string): Promise<SessionMessagesResponse> {
+export function getSessionMessages(id: string, token?: string): Promise<SessionMessagesResponse> {
 	return request(`/sessions/${id}/messages`, { token });
 }
 
@@ -375,7 +393,7 @@ export interface KnowledgeItem {
 }
 
 export function getKnowledge(
-	token: string,
+	token?: string,
 	page = 1,
 	limit = 20,
 	search = ''
@@ -386,8 +404,8 @@ export function getKnowledge(
 }
 
 export function createKnowledge(
-	token: string,
-	data: { title: string; content: string; content_type: string }
+	data: { title: string; content: string; content_type: string },
+	token?: string
 ): Promise<KnowledgeItem> {
 	return request('/knowledge/', {
 		method: 'POST',
@@ -397,9 +415,9 @@ export function createKnowledge(
 }
 
 export function updateKnowledge(
-	token: string,
 	id: string,
-	data: { title: string; content: string }
+	data: { title: string; content: string },
+	token?: string
 ): Promise<KnowledgeItem> {
 	return request(`/knowledge/${id}`, {
 		method: 'PATCH',
@@ -408,13 +426,13 @@ export function updateKnowledge(
 	});
 }
 
-export function deleteKnowledge(token: string, id: string): Promise<void> {
+export function deleteKnowledge(id: string, token?: string): Promise<void> {
 	return request(`/knowledge/${id}`, { method: 'DELETE', token });
 }
 
 export function uploadKnowledgeFile(
-	token: string,
 	file: File,
+	token?: string,
 	title?: string
 ): Promise<KnowledgeItem> {
 	const formData = new FormData();
@@ -452,8 +470,8 @@ export interface WebCrawlResponse {
 }
 
 export function scrapeWebUrl(
-	token: string,
-	url: string
+	url: string,
+	token?: string
 ): Promise<WebScrapeResponse> {
 	return request('/knowledge/scrape-web', {
 		method: 'POST',
@@ -463,8 +481,8 @@ export function scrapeWebUrl(
 }
 
 export function crawlWebsite(
-	token: string,
 	url: string,
+	token?: string,
 	options?: {
 		max_pages?: number;
 		max_depth?: number;
@@ -493,7 +511,7 @@ export interface UsageData {
 	[key: string]: unknown;
 }
 
-export function getUsage(token: string): Promise<UsageData> {
+export function getUsage(token?: string): Promise<UsageData> {
 	return request('/usage/', { token });
 }
 
@@ -509,7 +527,7 @@ export interface ToolsResponse {
 	tools: Tool[];
 }
 
-export function getTools(token: string): Promise<ToolsResponse> {
+export function getTools(token?: string): Promise<ToolsResponse> {
 	return request('/tools/', { token });
 }
 
@@ -538,15 +556,15 @@ export interface ProviderCreate {
 	base_url?: string;
 }
 
-export function getProviders(token: string): Promise<ProvidersResponse> {
+export function getProviders(token?: string): Promise<ProvidersResponse> {
 	return request('/providers/', { token });
 }
 
-export function getProvider(token: string, id: string): Promise<Provider> {
+export function getProvider(id: string, token?: string): Promise<Provider> {
 	return request(`/providers/${id}`, { token });
 }
 
-export function createProvider(token: string, data: ProviderCreate): Promise<Provider> {
+export function createProvider(data: ProviderCreate, token?: string): Promise<Provider> {
 	return request('/providers/', {
 		method: 'POST',
 		token,
@@ -554,7 +572,7 @@ export function createProvider(token: string, data: ProviderCreate): Promise<Pro
 	});
 }
 
-export function updateProvider(token: string, id: string, data: Partial<ProviderCreate>): Promise<Provider> {
+export function updateProvider(id: string, data: Partial<ProviderCreate>, token?: string): Promise<Provider> {
 	return request(`/providers/${id}`, {
 		method: 'PATCH',
 		token,
@@ -562,11 +580,11 @@ export function updateProvider(token: string, id: string, data: Partial<Provider
 	});
 }
 
-export function deleteProvider(token: string, id: string): Promise<void> {
+export function deleteProvider(id: string, token?: string): Promise<void> {
 	return request(`/providers/${id}`, { method: 'DELETE', token });
 }
 
-export function activateProvider(token: string, id: string): Promise<Provider> {
+export function activateProvider(id: string, token?: string): Promise<Provider> {
 	return request(`/providers/${id}/activate`, {
 		method: 'POST',
 		token
@@ -638,15 +656,15 @@ export interface ChannelCreate {
 	context_description?: string;
 }
 
-export function getChannels(token: string): Promise<ChannelsResponse> {
+export function getChannels(token?: string): Promise<ChannelsResponse> {
 	return request('/channels/', { token });
 }
 
-export function getChannel(token: string, id: string): Promise<Channel> {
+export function getChannel(id: string, token?: string): Promise<Channel> {
 	return request(`/channels/${id}`, { token });
 }
 
-export function createChannel(token: string, data: ChannelCreate): Promise<Channel> {
+export function createChannel(data: ChannelCreate, token?: string): Promise<Channel> {
 	return request('/channels/', {
 		method: 'POST',
 		token,
@@ -654,7 +672,7 @@ export function createChannel(token: string, data: ChannelCreate): Promise<Chann
 	});
 }
 
-export function updateChannel(token: string, id: string, data: Partial<ChannelCreate>): Promise<Channel> {
+export function updateChannel(id: string, data: Partial<ChannelCreate>, token?: string): Promise<Channel> {
 	return request(`/channels/${id}`, {
 		method: 'PATCH',
 		token,
@@ -662,11 +680,11 @@ export function updateChannel(token: string, id: string, data: Partial<ChannelCr
 	});
 }
 
-export function deleteChannel(token: string, id: string): Promise<void> {
+export function deleteChannel(id: string, token?: string): Promise<void> {
 	return request(`/channels/${id}`, { method: 'DELETE', token });
 }
 
-export function setDefaultChannel(token: string, id: string): Promise<Channel> {
+export function setDefaultChannel(id: string, token?: string): Promise<Channel> {
 	return request(`/channels/${id}/set-default`, {
 		method: 'POST',
 		token
@@ -675,14 +693,14 @@ export function setDefaultChannel(token: string, id: string): Promise<Channel> {
 
 // ---------- Embed Configuration ----------
 
-export function getEmbedConfig(token: string, channelId: string): Promise<EmbedConfigResponse> {
+export function getEmbedConfig(channelId: string, token?: string): Promise<EmbedConfigResponse> {
 	return request(`/channels/${channelId}/embed`, { token });
 }
 
 export function configureEmbed(
-	token: string,
 	channelId: string,
-	config: EmbedConfig
+	config: EmbedConfig,
+	token?: string
 ): Promise<EmbedConfigResponse> {
 	return request(`/channels/${channelId}/embed`, {
 		method: 'POST',
@@ -691,7 +709,7 @@ export function configureEmbed(
 	});
 }
 
-export function disableEmbed(token: string, channelId: string): Promise<void> {
+export function disableEmbed(channelId: string, token?: string): Promise<void> {
 	return request(`/channels/${channelId}/embed`, { method: 'DELETE', token });
 }
 

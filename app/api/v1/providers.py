@@ -62,7 +62,7 @@ class ProviderListResponse(BaseModel):
 
 @router.get("/", response_model=ProviderListResponse)
 async def list_providers(
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db),
 ):
     """List all provider credentials ordered by priority."""
@@ -86,7 +86,7 @@ async def list_providers(
 @router.post("/", response_model=ProviderResponse, status_code=status.HTTP_201_CREATED)
 async def create_provider(
     data: ProviderCreate,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db),
 ):
     """Add a new provider credential."""
@@ -115,7 +115,7 @@ async def create_provider(
 @router.get("/{provider_id}", response_model=ProviderResponse)
 async def get_provider(
     provider_id: UUID,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db),
 ):
     """Get a specific provider credential."""
@@ -132,7 +132,7 @@ async def get_provider(
 async def update_provider(
     provider_id: UUID,
     data: ProviderUpdate,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db),
 ):
     """Update a provider credential. Cannot update default provider."""
@@ -158,7 +158,7 @@ async def update_provider(
 @router.delete("/{provider_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_provider(
     provider_id: UUID,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db),
 ):
     """Delete a provider credential. Cannot delete default provider."""
@@ -179,7 +179,7 @@ async def delete_provider(
 @router.post("/{provider_id}/activate", response_model=ProviderResponse)
 async def activate_provider(
     provider_id: UUID,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db),
 ):
     """Set a provider as active (deactivates others)."""
@@ -206,7 +206,7 @@ async def activate_provider(
 async def reorder_provider(
     provider_id: UUID,
     new_order: int,
-    api_key: str = Depends(deps.verify_api_key),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db),
 ):
     """Change the priority order of a provider (for fallback)."""

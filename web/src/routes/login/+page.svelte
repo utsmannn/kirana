@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { base } from '$app/paths';
-	import { adminLogin, ApiError } from '$lib/api';
-	import { adminToken } from '$lib/stores.svelte';
+	import { adminLogin, getAdminConfig, ApiError } from '$lib/api';
+	import { adminToken, apiKey } from '$lib/stores.svelte';
 	import Button from '$lib/components/Button.svelte';
 
 	let password = $state('');
@@ -19,6 +19,15 @@
 		try {
 			const result = await adminLogin(password);
 			adminToken.value = result.token;
+
+			// Fetch API key for display
+			try {
+				const config = await getAdminConfig(result.token);
+				apiKey.value = config.api_key;
+			} catch {
+				// Ignore error - API key fetch is not critical
+			}
+
 			goto(`${base}/`);
 		} catch (err) {
 			if (err instanceof ApiError) {

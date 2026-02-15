@@ -57,3 +57,30 @@ async def verify_token(request: Request):
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
     return {"valid": True}
+
+
+class AdminConfigResponse(BaseModel):
+    api_key: str
+    app_name: str
+    app_env: str
+
+
+@router.get("/config", response_model=AdminConfigResponse)
+async def get_admin_config(request: Request):
+    """Get admin configuration including API key for display.
+
+    Requires valid admin token.
+    """
+    auth = request.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing token")
+
+    token = auth[7:]
+    if not verify_admin_token(token):
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    return AdminConfigResponse(
+        api_key=settings.KIRANA_API_KEY,
+        app_name=settings.APP_NAME,
+        app_env=settings.APP_ENV,
+    )

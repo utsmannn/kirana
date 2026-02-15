@@ -18,7 +18,7 @@ class ToolExecuteRequest(BaseModel):
 
 @router.get("/")
 async def list_tools(
-    api_key: str = Depends(deps.verify_api_key)
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token)
 ):
     """List all available tools."""
     tools = tool_registry.list_tools()
@@ -28,7 +28,7 @@ async def list_tools(
 @router.post("/execute")
 async def execute_tool(
     request: ToolExecuteRequest,
-    api_key: str = Depends(deps.verify_api_key)
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token)
 ):
     """Execute a tool with the given arguments."""
     tool = tool_registry.get_tool(request.tool)
