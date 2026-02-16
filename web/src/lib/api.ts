@@ -713,6 +713,26 @@ export function disableEmbed(channelId: string, token?: string): Promise<void> {
 	return request(`/channels/${channelId}/embed`, { method: 'DELETE', token });
 }
 
+// ---------- Brand Style Extraction ----------
+
+export interface BrandStyleResponse {
+	success: boolean;
+	primary_color?: string;
+	secondary_color?: string;
+	bg_color?: string;
+	text_color?: string;
+	font_family?: string;
+	error?: string;
+}
+
+export function extractBrandStyle(url: string, token?: string): Promise<BrandStyleResponse> {
+	return request('/channels/extract-brand-style', {
+		method: 'POST',
+		token,
+		body: JSON.stringify({ url })
+	});
+}
+
 // ---------- WebSocket Chat ----------
 
 export interface WsMessage {

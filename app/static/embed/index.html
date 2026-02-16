@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Chat</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         html, body {
@@ -67,6 +68,53 @@
             white-space: pre-wrap;
             word-break: break-word;
             box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+        }
+        .message.assistant .message-content {
+            white-space: normal;
+        }
+        .message.assistant .message-content p {
+            margin-bottom: 0.75rem;
+        }
+        .message.assistant .message-content p:last-child {
+            margin-bottom: 0;
+        }
+        .message.assistant .message-content pre {
+            background: rgba(0,0,0,0.2);
+            padding: 0.75rem;
+            border-radius: 0.5rem;
+            overflow-x: auto;
+            margin: 0.75rem 0;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 0.8rem;
+        }
+        .message.assistant .message-content code {
+            background: rgba(0,0,0,0.15);
+            padding: 0.125rem 0.25rem;
+            border-radius: 0.25rem;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 0.85em;
+        }
+        .message.assistant .message-content pre code {
+            background: transparent;
+            padding: 0;
+        }
+        .message.assistant .message-content ul, .message.assistant .message-content ol {
+            margin: 0.75rem 0;
+            padding-left: 1.25rem;
+        }
+        .message.assistant .message-content blockquote {
+            border-left: 3px solid var(--primary-color, #4f46e5);
+            padding-left: 0.75rem;
+            margin: 0.75rem 0;
+            opacity: 0.8;
+        }
+        .message.assistant .message-content a {
+            color: var(--primary-color, #4f46e5);
+            text-decoration: underline;
+        }
+        .message.assistant .message-content img {
+            max-width: 100%;
+            border-radius: 0.5rem;
         }
         .message.user .message-content {
             background: var(--primary-color, #4f46e5);
@@ -196,6 +244,7 @@
         const urlHeaderTitle = urlParams.get('title');
         const urlCssUrl = urlParams.get('cssUrl');
         const urlBubbleStyle = urlParams.get('bubble');
+        const urlFontFamily = urlParams.get('font');
 
         const HISTORY_KEY = `kirana_embed_history_${channelId}`;
         const STREAM_KEY = `kirana_embed_stream_${channelId}`;
@@ -288,6 +337,12 @@
             // Apply bubble style class to body
             const bubbleStyle = urlBubbleStyle || config?.bubble_style || 'rounded';
             document.body.className = `bubble-${bubbleStyle}`;
+
+            // Apply font family
+            const fontFamily = urlFontFamily || config?.font_family;
+            if (fontFamily) {
+                document.body.style.fontFamily = fontFamily;
+            }
         }
 
         // WebSocket connection
@@ -532,9 +587,13 @@
                 let msgsHtml = '';
                 messages.forEach((m) => {
                     if (m.content) {
+                        const contentHtml = m.role === 'assistant' 
+                            ? marked.parse(m.content) 
+                            : escapeHtml(m.content);
+                            
                         msgsHtml += `
                             <div class="message ${m.role}">
-                                <div class="message-content">${escapeHtml(m.content)}</div>
+                                <div class="message-content">${contentHtml}</div>
                             </div>
                         `;
                     }

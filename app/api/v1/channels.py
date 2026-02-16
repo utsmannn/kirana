@@ -12,6 +12,7 @@ from app.api import deps
 from app.config import settings
 from app.models.channel import Channel
 from app.models.provider import ProviderCredential
+from app.services.brand_style_extractor import get_brand_extractor
 
 router = APIRouter()
 
@@ -457,6 +458,40 @@ class PublicEmbedConfig(BaseModel):
     text_color: Optional[str] = None
     bubble_style: str = "rounded"
     custom_css_url: Optional[str] = None
+
+
+class BrandStyleExtractRequest(BaseModel):
+    """Request for extracting brand style from URL."""
+    url: str = Field(..., description="Website URL to extract brand style from")
+
+
+class BrandStyleResponse(BaseModel):
+    """Response with extracted brand style."""
+    success: bool
+    primary_color: Optional[str] = None
+    secondary_color: Optional[str] = None
+    bg_color: Optional[str] = None
+    text_color: Optional[str] = None
+    font_family: Optional[str] = None
+    error: Optional[str] = None
+
+
+@router.post("/extract-brand-style", response_model=BrandStyleResponse)
+async def extract_brand_style(
+    data: BrandStyleExtractRequest,
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
+):
+    """Extract brand style (colors, font) from a website URL.
+
+    Uses Jina.ai to capture a screenshot, then Z.AI Vision to analyze
+    the visual identity and extract primary colors and font.
+    """
+    try:
+        extractor = get_brand_extractor()
+        result = await extractor.extract(data.url)
+        return BrandStyleResponse(**result)
+    except Exception as e:
+        return BrandStyleResponse(success=False, error=str(e))
 
 
 @router.get("/{channel_id}/embed/public", response_model=PublicEmbedConfig)

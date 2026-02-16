@@ -11,6 +11,7 @@
 		getEmbedConfig,
 		configureEmbed,
 		disableEmbed,
+		extractBrandStyle,
 		ApiError,
 		type Provider,
 		type Channel,
@@ -52,6 +53,7 @@
 	let embedConfig = $state<EmbedConfigResponse | null>(null);
 	let embedLoading = $state(false);
 	let embedSaving = $state(false);
+	let isCustomFont = $state(false);
 	let embedForm = $state({
 		public: true,
 		save_history: true,
@@ -65,6 +67,10 @@
 		bubble_style: 'rounded',
 		header_title: ''
 	});
+
+	// Brand style extraction
+	let brandUrl = $state('');
+	let brandExtracting = $state(false);
 
 	onMount(async () => {
 		if (!adminToken.value) {
@@ -177,6 +183,7 @@
 	}
 
 	async function openEmbedModal(channel: Channel) {
+		const standardFonts = ['', 'Inter, sans-serif', "'Roboto', sans-serif", "'Open Sans', sans-serif", "'JetBrains Mono', monospace", 'Georgia, serif'];
 		embedChannel = channel;
 		embedLoading = true;
 		showEmbedModal = true;
@@ -188,12 +195,14 @@
 				stream_mode: embedConfig.stream_mode,
 				regenerate_token: false,
 				theme: embedConfig.theme || 'dark',
-									primary_color: embedConfig.primary_color || '#4f46e5',
-									bg_color: embedConfig.bg_color || '',
-									text_color: embedConfig.text_color || '',				font_family: embedConfig.font_family || '',
+				primary_color: embedConfig.primary_color || '#4f46e5',
+				bg_color: embedConfig.bg_color || '',
+				text_color: embedConfig.text_color || '',
+				font_family: embedConfig.font_family || '',
 				bubble_style: embedConfig.bubble_style || 'rounded',
 				header_title: embedConfig.header_title || ''
 			};
+			isCustomFont = !standardFonts.includes(embedForm.font_family);
 		} catch (err) {
 			// If no embed config exists, use defaults
 			embedConfig = null;
@@ -203,13 +212,14 @@
 				stream_mode: true,
 				regenerate_token: false,
 				theme: 'dark',
-				primary_color: '#6366f1',
+				primary_color: '#4f46e5',
 				bg_color: '',
 				text_color: '',
 				font_family: '',
 				bubble_style: 'rounded',
 				header_title: ''
 			};
+			isCustomFont = false;
 		} finally {
 			embedLoading = false;
 		}
@@ -246,6 +256,61 @@
 			}
 		} finally {
 			embedSaving = false;
+		}
+	}
+
+	async function handleExtractBrandStyle() {
+		if (!brandUrl.trim()) {
+			showToast('Please enter a website URL', 'error');
+			return;
+		}
+
+		brandExtracting = true;
+		try {
+			const result = await extractBrandStyle(brandUrl.trim());
+
+			if (!result.success) {
+				showToast(result.error || 'Failed to extract brand style', 'error');
+				return;
+			}
+
+			// Apply extracted styles to form
+			if (result.primary_color) {
+				embedForm.primary_color = result.primary_color;
+			}
+			if (result.bg_color) {
+				embedForm.bg_color = result.bg_color;
+			}
+			if (result.text_color) {
+				embedForm.text_color = result.text_color;
+			}
+			if (result.font_family) {
+				embedForm.font_family = result.font_family;
+				// Check if it's a custom font
+				const standardFonts = ['', 'Inter, sans-serif', "'Roboto', sans-serif", "'Open Sans', sans-serif", "'JetBrains Mono', monospace", 'Georgia, serif'];
+				isCustomFont = !standardFonts.includes(result.font_family);
+			}
+
+			// Determine theme based on background color brightness
+			if (result.bg_color) {
+				const hex = result.bg_color.replace('#', '');
+				const r = parseInt(hex.substr(0, 2), 16);
+				const g = parseInt(hex.substr(2, 2), 16);
+				const b = parseInt(hex.substr(4, 2), 16);
+				const brightness = (r * 299 + g * 587 + b * 114) / 1000;
+				embedForm.theme = brightness > 128 ? 'light' : 'dark';
+			}
+
+			showToast('Brand style extracted successfully!', 'success');
+			brandUrl = '';
+		} catch (err) {
+			if (err instanceof ApiError) {
+				showToast(err.message, 'error');
+			} else {
+				showToast('Failed to extract brand style', 'error');
+			}
+		} finally {
+			brandExtracting = false;
 		}
 	}
 
@@ -616,12 +681,50 @@
 					<section>
 						<h4 class="text-[11px] font-bold text-zinc-500 mb-4 uppercase tracking-widest border-b border-zinc-800 pb-2">Customization</h4>
 						<div class="space-y-4">
+							<!-- Brand Style Extractor -->
+							<div class="p-3 rounded-lg bg-gradient-to-r from-indigo-500/10 to-purple-500/10 border border-indigo-500/20">
+								<div class="flex items-center gap-2 mb-2">
+									<svg class="h-4 w-4 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01"></path>
+									</svg>
+									<span class="text-xs font-semibold text-indigo-300">Extract Style from Brand</span>
+								</div>
+								<p class="text-[10px] text-zinc-500 mb-2">Enter a website URL to automatically extract colors and font</p>
+								<div class="flex gap-2">
+									<input
+										type="url"
+										bind:value={brandUrl}
+										placeholder="https://example.com"
+										disabled={brandExtracting}
+										class="flex-1 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-200 focus:border-indigo-500 outline-none transition-all disabled:opacity-50"
+									/>
+									<button
+										onclick={handleExtractBrandStyle}
+										disabled={brandExtracting || !brandUrl.trim()}
+										class="px-3 py-1.5 rounded-lg bg-indigo-600 text-xs font-medium text-white hover:bg-indigo-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5 shrink-0"
+									>
+										{#if brandExtracting}
+											<svg class="h-3 w-3 animate-spin" fill="none" viewBox="0 0 24 24">
+												<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+												<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+											</svg>
+											Extracting...
+										{:else}
+											<svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+											</svg>
+											Extract
+										{/if}
+									</button>
+								</div>
+							</div>
+
 							<div>
 								<label class="block text-xs font-medium text-zinc-400 mb-1.5">Window Title</label>
 								<input type="text" bind:value={embedForm.header_title} placeholder="Chat" maxlength="50"
 									class="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition-all" />
 							</div>
-							
+
 							<div class="grid grid-cols-2 gap-3">
 								<div>
 									<label class="block text-xs font-medium text-zinc-400 mb-1.5">Theme</label>
@@ -699,6 +802,41 @@
 										class="flex-1 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 font-mono focus:border-indigo-500 outline-none transition-all uppercase" />
 								</div>
 							</div>
+
+							<div>
+								<label class="block text-xs font-medium text-zinc-400 mb-1.5">Font Family</label>
+								<div class="relative">
+									<select 
+										value={isCustomFont ? 'custom' : embedForm.font_family}
+										onchange={(e) => {
+											const val = e.currentTarget.value;
+											if (val === 'custom') {
+												isCustomFont = true;
+											} else {
+												isCustomFont = false;
+												embedForm.font_family = val;
+											}
+										}}
+										class="w-full appearance-none rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-indigo-500 outline-none cursor-pointer">
+										<option value="">Default (System Sans)</option>
+										<option value="Inter, sans-serif">Inter</option>
+										<option value="'Roboto', sans-serif">Roboto</option>
+										<option value="'Open Sans', sans-serif">Open Sans</option>
+										<option value="'JetBrains Mono', monospace">JetBrains Mono</option>
+										<option value="Georgia, serif">Georgia</option>
+										<option value="custom">Custom Font...</option>
+									</select>
+									<div class="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-zinc-500">
+										<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+									</div>
+								</div>
+								{#if isCustomFont}
+									<input type="text" 
+										bind:value={embedForm.font_family}
+										placeholder="e.g. 'Poppins', sans-serif"
+										class="mt-2 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-indigo-500 outline-none transition-all" />
+								{/if}
+							</div>
 						</div>
 					</section>
 				</div>
@@ -743,7 +881,7 @@
 					style="
 						background: {embedForm.bg_color || (embedForm.theme === 'dark' ? '#09090b' : '#ffffff')};
 						color: {embedForm.text_color || (embedForm.theme === 'dark' ? '#e4e4e7' : '#1f2937')};
-						font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+						font-family: {embedForm.font_family || '-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif'};
 						border-color: {embedForm.theme === 'dark' ? '#27272a' : '#e5e7eb'};
 					"
 				>

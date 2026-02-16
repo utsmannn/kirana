@@ -70,6 +70,63 @@
 	}
 </script>
 
+<style>
+	:global(.markdown-content p) {
+		margin-bottom: 0.75rem;
+	}
+	:global(.markdown-content p:last-child) {
+		margin-bottom: 0;
+	}
+	:global(.markdown-content pre) {
+		background-color: #18181b;
+		padding: 1rem;
+		border-radius: 0.5rem;
+		overflow-x: auto;
+		margin: 0.75rem 0;
+		border: 1px solid #27272a;
+	}
+	:global(.markdown-content code) {
+		font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+		font-size: 0.85em;
+		background-color: rgba(255, 255, 255, 0.1);
+		padding: 0.125rem 0.25rem;
+		border-radius: 0.25rem;
+	}
+	:global(.markdown-content pre code) {
+		background-color: transparent;
+		padding: 0;
+		font-size: 0.8rem;
+	}
+	:global(.markdown-content ul, .markdown-content ol) {
+		margin: 0.75rem 0;
+		padding-left: 1.5rem;
+	}
+	:global(.markdown-content ul) {
+		list-style-type: disc;
+	}
+	:global(.markdown-content ol) {
+		list-style-type: decimal;
+	}
+	:global(.markdown-content li) {
+		margin-bottom: 0.25rem;
+	}
+	:global(.markdown-content blockquote) {
+		border-left: 3px solid #4f46e5;
+		padding-left: 1rem;
+		margin: 1rem 0;
+		font-style: italic;
+		color: #a1a1aa;
+	}
+	:global(.markdown-content a) {
+		color: #6366f1;
+		text-decoration: underline;
+	}
+</style>
+
+<svelte:head>
+	<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</svelte:head>
+
 <div class="mx-auto max-w-4xl p-6">
 	<!-- Back link -->
 	<a
@@ -143,7 +200,14 @@
 									? 'bg-zinc-800 text-zinc-200'
 									: 'bg-zinc-800/50 text-zinc-400 italic'}"
 						>
-							<p class="whitespace-pre-wrap text-sm leading-relaxed">{message.content}</p>
+							{#if message.role === 'assistant'}
+								<div class="prose prose-invert prose-sm max-w-none markdown-content text-sm leading-relaxed text-zinc-200">
+									<!-- svelte-ignore svelte_dom_stringify -->
+									{@html (window as any).marked ? (window as any).marked.parse(message.content) : message.content}
+								</div>
+							{:else}
+								<p class="whitespace-pre-wrap text-sm leading-relaxed">{message.content}</p>
+							{/if}
 							<p class="mt-1 text-[10px] opacity-50">
 								{formatTime(message.created_at)}
 							</p>
