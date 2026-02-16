@@ -13,11 +13,16 @@ on:
           - major
         default: 'patch'
 
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
 env:
   REGISTRY: ghcr.io
 
 jobs:
-  version:
+  prepare:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.bump.outputs.version }}
@@ -30,28 +35,24 @@ jobs:
       - name: Get latest tag
         id: latest
         run: |
-          # Get the latest semver tag, default to v0.0.0 if none exists
           LATEST_TAG=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo "v0.0.0")
           echo "tag=$LATEST_TAG" >> $GITHUB_OUTPUT
           echo "Latest tag: $LATEST_TAG"
 
-      - name: Bump version
+      - name: Calculate new version
         id: bump
         run: |
           CURRENT_TAG=${{ steps.latest.outputs.tag }}
           CURRENT_VERSION=${CURRENT_TAG#v}
 
-          # Parse version
           MAJOR=$(echo $CURRENT_VERSION | cut -d. -f1)
           MINOR=$(echo $CURRENT_VERSION | cut -d. -f2)
           PATCH=$(echo $CURRENT_VERSION | cut -d. -f3)
 
-          # Default to 0 if empty
           MAJOR=${MAJOR:-0}
           MINOR=${MINOR:-0}
           PATCH=${PATCH:-0}
 
-          # Bump based on input
           case "${{ inputs.version_bump }}" in
             major)
               MAJOR=$((MAJOR + 1))
@@ -71,21 +72,9 @@ jobs:
           echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "New version: $NEW_VERSION"
 
-      - name: Create and push tag
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag ${{ steps.bump.outputs.version }}
-          git push origin ${{ steps.bump.outputs.version }}
-
   build:
-    needs: version
+    needs: prepare
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      packages: write
-      id-token: write
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -109,7 +98,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ github.repository }}
           tags: |
-            type=raw,value=${{ needs.version.outputs.version }}
+            type=raw,value=${{ needs.prepare.outputs.version }}
             type=raw,value=latest
 
       - name: Build and push Docker image
@@ -132,19 +121,25 @@ jobs:
           push-to-registry: true
 
   release:
-    needs: [version, build]
+    needs: [prepare, build]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create and push tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag ${{ needs.prepare.outputs.version }}
+          git push origin ${{ needs.prepare.outputs.version }}
 
       - name: Extract changelog
         id: changelog
         run: |
-          VERSION=${{ needs.version.outputs.version }}
+          VERSION=${{ needs.prepare.outputs.version }}
           if [ -f CHANGELOG.md ]; then
             CHANGELOG=$(sed -n "/## \[${VERSION}\]/,/## \[/p" CHANGELOG.md | sed '1d;$d' | sed '1{/^$/d}')
             if [ -z "$CHANGELOG" ]; then
@@ -160,13 +155,13 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ needs.version.outputs.version }}
-          name: Kirana ${{ needs.version.outputs.version }}
+          tag_name: ${{ needs.prepare.outputs.version }}
+          name: Kirana ${{ needs.prepare.outputs.version }}
           body: |
             ## Docker Image
 
             ```bash
-            docker pull ghcr.io/${{ github.repository }}:${{ needs.version.outputs.version }}
+            docker pull ghcr.io/${{ github.repository }}:${{ needs.prepare.outputs.version }}
             ```
 
             ## Changes
