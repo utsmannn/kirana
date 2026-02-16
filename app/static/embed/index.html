@@ -199,6 +199,8 @@
 
         const HISTORY_KEY = `kirana_embed_history_${channelId}`;
         const STREAM_KEY = `kirana_embed_stream_${channelId}`;
+        const VISITOR_KEY = `kirana_embed_visitor_${channelId}`;
+        const SESSION_KEY = `kirana_embed_session_${channelId}`;
 
         let messages = [];
         let config = null;
@@ -208,6 +210,32 @@
         let currentStreamId = null;
         let reconnectAttempts = 0;
         const MAX_RECONNECT = 5;
+
+        // Generate or get unique visitor ID for this embed/channel
+        function getVisitorId() {
+            let visitorId = localStorage.getItem(VISITOR_KEY);
+            if (!visitorId) {
+                // Generate random ID: 8 chars hex
+                visitorId = Math.random().toString(36).substring(2, 10) + Date.now().toString(36).substring(-4);
+                localStorage.setItem(VISITOR_KEY, visitorId);
+            }
+            return visitorId;
+        }
+
+        // Get/set session ID for continuity
+        function getSessionId() {
+            return localStorage.getItem(SESSION_KEY);
+        }
+
+        function setSessionId(sessionId) {
+            if (sessionId) {
+                localStorage.setItem(SESSION_KEY, sessionId);
+            }
+        }
+
+        function clearSessionId() {
+            localStorage.removeItem(SESSION_KEY);
+        }
 
         // Get header title (URL param > config > default)
         function getHeaderTitle() {
@@ -346,6 +374,11 @@
                     currentStreamId = null;
                     clearStreamState();
                     saveHistory();
+                    // Save session_id for conversation continuity (if provided)
+                    if (msg.session_id) {
+                        setSessionId(msg.session_id);
+                        console.log('[WS] Session saved:', msg.session_id);
+                    }
                     render();
                     break;
 
@@ -373,15 +406,25 @@
             saveHistory();
             render();
 
-            // Send chat request via WebSocket (include all messages with new user message)
+            // Build request data with visitor_id and session_id for persistence
+            const requestData = {
+                model: 'default',
+                messages: messages,  // All messages including the new user message
+                stream: true,
+                channel_id: channelId,
+                visitor_id: getVisitorId()
+            };
+
+            // Include session_id if we have one (for conversation continuity)
+            const existingSessionId = getSessionId();
+            if (existingSessionId) {
+                requestData.session_id = existingSessionId;
+            }
+
+            // Send chat request via WebSocket
             ws.send(JSON.stringify({
                 action: 'chat',
-                data: {
-                    model: 'default',
-                    messages: messages,  // All messages including the new user message
-                    stream: true,
-                    channel_id: channelId
-                }
+                data: requestData
             }));
         }
 
@@ -438,6 +481,7 @@
             streaming = false;
             localStorage.removeItem(HISTORY_KEY);
             clearStreamState();
+            clearSessionId();  // Clear session to start fresh conversation
             render();
         }
 

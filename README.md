@@ -62,7 +62,65 @@ Kirana uses a flexible two-layer configuration:
 - Docker & Docker Compose
 - OpenAI-compatible API key (OpenAI, Z.AI, etc.)
 
-### 1. Clone and Configure
+### Option 1: Using Pre-built Image (Recommended)
+
+Pull the latest image from GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/utsmannn/kirana:latest
+```
+
+Create a `docker-compose.yml`:
+
+```yaml
+services:
+  kirana:
+    image: ghcr.io/utsmannn/kirana:latest
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=your-api-key
+      - KIRANA_API_KEY=your-secure-api-key
+      - ADMIN_PASSWORD=your-admin-password
+      - DB_HOST=postgres
+      - DB_USER=kirana
+      - DB_PASS=kirana
+      - DB_NAME=kirana
+      - REDIS_HOST=redis
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - kirana-uploads:/app/uploads
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=kirana
+      - POSTGRES_PASSWORD=kirana
+      - POSTGRES_DB=kirana
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis-data:/data
+
+volumes:
+  kirana-uploads:
+  postgres-data:
+  redis-data:
+```
+
+Start services:
+```bash
+docker compose up -d
+```
+
+### Option 2: Build from Source
+
+**1. Clone and Configure**
 
 ```bash
 git clone <repository-url>
@@ -75,7 +133,7 @@ cp .env.example .env
 vim .env
 ```
 
-### 2. Start Services
+**2. Start Services**
 
 ```bash
 docker compose up -d
@@ -93,7 +151,9 @@ Services will be available at:
 - **PostgreSQL**: localhost:5432
 - **Redis**: localhost:6379
 
-### 3. First API Call
+### Quick Test
+
+**API Call:**
 
 ```bash
 curl -X POST http://localhost:8000/v1/chat/completions \
@@ -102,10 +162,34 @@ curl -X POST http://localhost:8000/v1/chat/completions \
   -d '{"model": "default", "messages": [{"role": "user", "content": "Hello!"}]}'
 ```
 
-### 4. Access Admin Panel
+**Admin Panel:**
 
 Open http://localhost:8000/panel and login with:
 - **Password**: `admin` (or your `ADMIN_PASSWORD` from .env)
+
+### Available Docker Tags
+
+| Tag | Description |
+|-----|-------------|
+| `ghcr.io/utsmannn/kirana:latest` | Latest stable release |
+| `ghcr.io/utsmannn/kirana:main` | Latest development build |
+| `ghcr.io/utsmannn/kirana:v1.0.0` | Specific version |
+| `ghcr.io/utsmannn/kirana:1.0` | Major.minor version |
+
+### Creating a Release
+
+To create a new release with automatic Docker image and GitHub Release:
+
+```bash
+# Create and push a version tag
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+This will:
+1. Build Docker image for `linux/amd64` and `linux/arm64`
+2. Push to `ghcr.io/utsmannn/kirana:v1.0.0`, `ghcr.io/utsmannn/kirana:1.0`, `ghcr.io/utsmannn/kirana:1`
+3. Create GitHub Release with changelog from `CHANGELOG.md`
 
 ## Configuration
 
@@ -115,11 +199,14 @@ Open http://localhost:8000/panel and login with:
 |----------|-------------|---------|
 | `KIRANA_API_KEY` | API key for client authentication | `kirana-default-api-key-change-me` |
 | `ADMIN_PASSWORD` | Admin panel login password | `admin` |
+| `SECRET_KEY` | Secret for admin token generation | (random) |
 | `APP_PORT` | Application port | `8000` |
 | **LLM Provider** |||
 | `OPENAI_API_KEY` | Your LLM API key (OpenAI, Z.AI, etc.) | - |
 | `OPENAI_BASE_URL` | Custom provider base URL | `https://api.openai.com/v1` |
 | `DEFAULT_MODEL` | Default model identifier | `gpt-4o-mini` |
+| `LLM_TIMEOUT` | LLM request timeout (seconds) | `120` |
+| `LLM_MAX_RETRIES` | Max retry attempts | `3` |
 | **Database** |||
 | `DB_HOST` | PostgreSQL host | `localhost` |
 | `DB_PORT` | PostgreSQL port | `5432` |
@@ -135,6 +222,8 @@ Open http://localhost:8000/panel and login with:
 | **Features** |||
 | `SESSION_EXPIRY_DAYS` | Auto-archive sessions after N days | `3` |
 | `CORS_ORIGINS` | Allowed CORS origins (comma-separated) | `*` |
+| **Optional Services** |||
+| `ZAI_API_KEY` | Z.AI API key for Vision and MCP | - |
 
 ## API Reference
 
@@ -707,6 +796,95 @@ echo chatSimple('Hello!');
 
 ## Advanced Features
 
+### Embed Widget
+
+Kirana provides an embeddable chat widget that you can add to any website. The widget connects to your Kirana instance and provides real-time chat functionality.
+
+#### Basic Embed
+
+Add this to your HTML:
+
+```html
+<iframe
+  src="http://localhost:8000/embed?channel_id=YOUR_CHANNEL_ID"
+  width="400"
+  height="600"
+  style="border: none; border-radius: 12px;"
+></iframe>
+```
+
+#### Embed Authentication Options
+
+| Method | Parameter | Description |
+|--------|-----------|-------------|
+| **Public** | `?channel_id=<uuid>` | No auth required if channel has `public: true` |
+| **Token** | `?embed_token=<token>` | Use embed token from channel config |
+| **API Key** | `?token=<api_key>` | Full API access (admin use) |
+
+#### Embed URL Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `channel_id` | UUID | Channel to use (required) |
+| `embed_token` | string | Embed token for private channels |
+| `token` | string | API key for full access |
+| `theme` | string | Theme: `dark` or `light` (default: channel config) |
+| `bg_color` | string | Background color (hex, overrides theme) |
+| `text_color` | string | Text color (hex, overrides theme) |
+| `primary_color` | string | Primary/accent color (hex) |
+| `bubble_style` | string | Bubble style: `rounded`, `square`, `minimal` |
+| `header_title` | string | Custom header title |
+| `css_url` | string | URL to custom CSS file |
+
+#### Example with Customization
+
+```html
+<iframe
+  src="http://localhost:8000/embed?channel_id=abc-123&theme=light&primary_color=%234f46e5&header_title=Support%20Chat&bubble_style=rounded"
+  width="400"
+  height="600"
+  style="border: none;"
+></iframe>
+```
+
+#### Configuring Embed in Admin Panel
+
+1. Go to **Channels** in admin panel
+2. Click **Edit** on a channel
+3. Scroll to **Embed Configuration**
+4. Enable embed and configure:
+   - **Save History**: Store chat history (localStorage + server session)
+   - **Public Access**: Allow access without embed token
+
+#### How Embed Sessions Work
+
+Each visitor gets a unique session for conversation continuity:
+
+1. **First visit**: Widget generates unique `visitor_id`, stores in localStorage
+2. **Backend creates session**: Session named `Embed - {visitor_id}` (e.g., `Embed - a7f3b2c1`)
+3. **Subsequent chats**: Widget sends `visitor_id` + `session_id` for continuity
+4. **Session appears in admin**: View all embed conversations in **Sessions** page
+
+```
+User A (Browser 1) → Session: "Embed - a7f3b2c1"
+User B (Browser 2) → Session: "Embed - x9y8z7w6"
+```
+
+Each visitor's conversation is isolated - no cross-user history sharing.
+
+#### WebSocket Support
+
+Embed uses WebSocket for real-time streaming. Connection URL:
+
+```
+ws://localhost:8000/v1/chat/ws?channel_id=<uuid>
+```
+
+For private channels:
+```
+ws://localhost:8000/v1/chat/ws?embed_token=<token>
+```
+
 ### Tool Calling (Server-Side Configured)
 
 Tools are configured **server-side** in Kirana. Clients don't need to define tools - just use the channel that has the tools enabled.
@@ -737,29 +915,107 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 # Kirana auto-calls query_knowledge if channel is configured
 ```
 
+### Context Guard
+
+Context Guard restricts AI responses to a specific domain/context. When enabled, the AI will only answer questions related to the configured context and politely decline off-topic queries.
+
+#### Configuration (via Admin Panel)
+
+1. Go to **Channels** → Edit Channel
+2. Under **Context Guard**:
+   - **Context Name**: The domain/entity (e.g., "Sekolah ABC", "Produk XYZ")
+   - **Context Description**: Additional details (optional)
+
+#### Example Behavior
+
+**Context:** "Sekolah ABC" with description "SMA di Jakarta"
+
+| User Question | AI Response |
+|---------------|-------------|
+| "Jam berapa sekolah buka?" | Answers with school info |
+| "Berapa biaya SPP?" | Answers from knowledge base |
+| "Bagaimana cuaca hari ini?" | Politely declines - off-topic |
+| "Ceritakan lelucon" | Politely declines - off-topic |
+
+**Without Context Guard:** AI answers any question freely.
+
+### Web Scraping & Crawling
+
+Kirana can scrape websites and add content to the knowledge base automatically.
+
+#### Scrape Single URL
+
+```bash
+curl -X POST http://localhost:8000/v1/knowledge/scrape-web \
+  -H "Authorization: Bearer kirana-default-api-key-change-me" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com/article"}'
+```
+
+#### Crawl Entire Website
+
+```bash
+curl -X POST http://localhost:8000/v1/knowledge/crawl-web \
+  -H "Authorization: Bearer kirana-default-api-key-change-me" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://example.com/docs",
+    "max_pages": 50,
+    "max_depth": 3,
+    "path_prefix": "/docs/"
+  }'
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `url` | required | Starting URL |
+| `max_pages` | 50 | Maximum pages to crawl |
+| `max_depth` | 3 | Maximum link depth |
+| `path_prefix` | null | Only crawl URLs starting with this path |
+
+**Note:** Uses Jina AI Reader for content extraction.
+
 ## Web Panel Usage
 
-The built-in admin panel provides a visual interface for:
+The built-in admin panel provides a visual interface for managing Kirana.
 
-### 1. Providers
+Access at: `http://localhost:8000/panel`
+
+### Dashboard
+- View API key for client integration
+- Usage statistics (total requests, tokens)
+- Quick access to all sections
+
+### Providers (Settings)
 - Add/edit LLM API providers
 - Configure API keys and base URLs
+- Set active provider
 - Set default models
 
-### 2. Channels
+### Channels
 - Create channels with custom personalities
 - Set system prompts and parameters
 - Assign providers to channels
+- **Context Guard**: Restrict AI to specific domain
+- **Embed Configuration**: Enable/disable embed access
 
-### 3. Sessions
-- View all chat sessions
+### Sessions
+- View all chat sessions (including embed sessions)
 - Create new sessions with channel selection
 - Browse conversation history
+- Delete sessions
 
-### 4. Chat Playground
+### Knowledge
+- Add text/markdown knowledge
+- Upload files (PDF, Word, Excel, PPT, images)
+- Scrape/crawl websites
+- Search and manage knowledge items
+
+### Chat
 - Test chat completions
 - Switch between sessions
 - Real-time streaming display
+- View conversation history
 
 ## Development
 
@@ -853,8 +1109,10 @@ Kirana implements the OpenAI Chat Completions API format:
 | `max_tokens` | integer | Maximum tokens to generate |
 | `tools` | array | Available function tools |
 | `tool_choice` | string | Tool selection strategy |
-| `session_id` | uuid | **Kirana-specific:** Persist conversation |
-| `stream_id` | string | **Kirana-specific:** For stream resume |
+| `session_id` | uuid | **Kirana:** Persist conversation |
+| `channel_id` | uuid | **Kirana:** Use specific channel |
+| `visitor_id` | string | **Kirana:** Unique visitor ID for embed sessions |
+| `stream_id` | string | **Kirana:** For stream resume |
 
 ## Troubleshooting
 

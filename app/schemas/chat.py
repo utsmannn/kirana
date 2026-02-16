@@ -26,6 +26,7 @@ class ChatCompletionRequest(BaseModel):
     # Kirana extensions
     session_id: Optional[uuid.UUID] = None
     channel_id: Optional[uuid.UUID] = None  # Channel to use for system prompt
+    visitor_id: Optional[str] = None  # Unique visitor identifier for embed chat sessions
     stream_id: Optional[str] = None
     kirana: Optional[Dict[str, Any]] = None
 

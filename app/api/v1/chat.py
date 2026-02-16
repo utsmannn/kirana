@@ -383,6 +383,7 @@ async def chat_websocket(
 
                 stream_id = str(uuid.uuid4())
                 current_stream_id = stream_id
+                session_id = None  # Track session_id from stream
 
                 await websocket.send_json({"type": "stream_start", "stream_id": stream_id})
 
@@ -392,10 +393,17 @@ async def chat_websocket(
 
                     try:
                         async for sse_chunk in chat_service.create_chat_completion_stream(request):
-                            # Parse SSE chunk to extract content
+                            # Parse SSE chunk to extract content or session_id
                             if sse_chunk.startswith("data: ") and sse_chunk.strip() != "data: [DONE]":
                                 try:
                                     payload = json.loads(sse_chunk[6:].strip())
+
+                                    # Check for session_id event
+                                    if "session_id" in payload:
+                                        session_id = payload["session_id"]
+                                        continue
+
+                                    # Regular content chunk
                                     content = payload.get("choices", [{}])[0].get("delta", {}).get("content", "")
                                     if content:
                                         try:
@@ -426,7 +434,11 @@ async def chat_websocket(
                             pass
 
                 try:
-                    await websocket.send_json({"type": "stream_end"})
+                    # Send stream_end with session_id if available
+                    end_payload = {"type": "stream_end"}
+                    if session_id:
+                        end_payload["session_id"] = session_id
+                    await websocket.send_json(end_payload)
                 except WebSocketDisconnect:
                     pass
 

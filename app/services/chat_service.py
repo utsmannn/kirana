@@ -258,6 +258,24 @@ Anda memiliki akses ke knowledge base yang telah disediakan.
                     )
                     channel = c_result.scalar_one_or_none()
 
+        # If no session but has channel_id and visitor_id (embed chat), create a new session
+        # This allows embed chats to be saved to the database with unique visitor identification
+        if not session and channel and request.visitor_id:
+            embed_config = channel.embed_config or {}
+            save_history = embed_config.get("save_history", True)
+
+            if save_history:
+                # Create new session for this embed chat visitor
+                # Name format: "Embed - {visitor_id}" for easy identification
+                session_name = f"Embed - {request.visitor_id[:8]}"
+                session = Session(
+                    name=session_name,
+                    channel_id=channel.id,
+                )
+                self.db.add(session)
+                await self.db.flush()  # Get the ID without committing
+                logger.info("[SESSION] Created new session for embed visitor: %s (channel: %s)", request.visitor_id[:8], channel.name)
+
         # Build system prompt with channel config
         system_prompt = await self.build_system_prompt(channel)
         messages = [{"role": "system", "content": system_prompt}]
@@ -505,6 +523,10 @@ Anda memiliki akses ke knowledge base yang telah disediakan.
                     yield f"data: {json.dumps(chunk.model_dump())}\n\n"
 
         yield "data: [DONE]\n\n"
+
+        # Send session_id if available (for embed chat to continue conversation)
+        if session:
+            yield f"data: {json.dumps({'session_id': str(session.id)})}\n\n"
 
         latency_ms = int((time.monotonic() - start_time) * 1000)
 
