@@ -350,7 +350,7 @@
 			fontSearchLoading = true;
 			showFontDropdown = true;
 			try {
-				const result = await searchFonts(query.trim());
+				const result = await searchFonts(query.trim(), adminToken.value || undefined);
 				fontSearchResults = result.fonts;
 			} catch {
 				fontSearchResults = [];
