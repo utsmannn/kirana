@@ -1,7 +1,7 @@
 # Frontend build stage
 FROM node:22-slim AS frontend
 WORKDIR /web
-COPY web/package.json web/bun.lock* web/package-lock.json* ./
+COPY web/package.json web/bun.lock ./
 RUN npm install --frozen-lockfile 2>/dev/null || npm install
 COPY web/ .
 RUN npm run build
