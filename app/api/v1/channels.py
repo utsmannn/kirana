@@ -173,6 +173,76 @@ async def create_channel(
     return ChannelResponse.from_orm(channel, provider.name)
 
 
+# ----- Static routes (must be before /{channel_id}) -----
+
+class FontSearchResponse(BaseModel):
+    """Response for font search."""
+    fonts: List[str]
+    total: int
+
+
+@router.get("/fonts", response_model=FontSearchResponse)
+async def search_fonts(
+    q: str = Query(default="", description="Search query for font name"),
+    limit: int = Query(default=20, ge=1, le=100, description="Max results"),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
+):
+    """Search Google Fonts by name."""
+    from app.services.brand_style_extractor import get_brand_extractor
+
+    extractor = get_brand_extractor()
+    fonts = await extractor.fonts_matcher.get_fonts()
+
+    if q:
+        q_lower = q.lower()
+        filtered = [f for f in fonts if q_lower in f.lower()]
+    else:
+        filtered = fonts
+
+    return FontSearchResponse(
+        fonts=filtered[:limit],
+        total=len(filtered)
+    )
+
+
+class BrandStyleExtractRequest(BaseModel):
+    """Request for extracting brand style from URL."""
+    url: str = Field(..., description="Website URL to extract brand style from")
+
+
+class BrandStyleResponse(BaseModel):
+    """Response with extracted brand style."""
+    success: bool
+    primary_color: Optional[str] = None
+    secondary_color: Optional[str] = None
+    bg_color: Optional[str] = None
+    text_color: Optional[str] = None
+    font_family: Optional[str] = None
+    google_fonts_name: Optional[str] = None
+    google_fonts_url: Optional[str] = None
+    error: Optional[str] = None
+
+
+@router.post("/extract-brand-style", response_model=BrandStyleResponse)
+async def extract_brand_style(
+    data: BrandStyleExtractRequest,
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
+):
+    """Extract brand style (colors, font) from a website URL.
+
+    Uses Jina.ai to capture a screenshot, then Z.AI Vision to analyze
+    the visual identity and extract primary colors and font.
+    """
+    try:
+        extractor = get_brand_extractor()
+        result = await extractor.extract(data.url)
+        return BrandStyleResponse(**result)
+    except Exception as e:
+        return BrandStyleResponse(success=False, error=str(e))
+
+
+# ----- Channel routes with UUID path parameter -----
+
 @router.get("/{channel_id}", response_model=ChannelResponse)
 async def get_channel(
     channel_id: UUID,
@@ -469,72 +539,6 @@ class PublicEmbedConfig(BaseModel):
     google_fonts_url: Optional[str] = None
     bubble_style: str = "rounded"
     custom_css_url: Optional[str] = None
-
-
-class BrandStyleExtractRequest(BaseModel):
-    """Request for extracting brand style from URL."""
-    url: str = Field(..., description="Website URL to extract brand style from")
-
-
-class BrandStyleResponse(BaseModel):
-    """Response with extracted brand style."""
-    success: bool
-    primary_color: Optional[str] = None
-    secondary_color: Optional[str] = None
-    bg_color: Optional[str] = None
-    text_color: Optional[str] = None
-    font_family: Optional[str] = None
-    google_fonts_name: Optional[str] = None
-    google_fonts_url: Optional[str] = None
-    error: Optional[str] = None
-
-
-class FontSearchResponse(BaseModel):
-    """Response for font search."""
-    fonts: List[str]
-    total: int
-
-
-@router.get("/fonts", response_model=FontSearchResponse)
-async def search_fonts(
-    q: str = Query(default="", description="Search query for font name"),
-    limit: int = Query(default=20, ge=1, le=100, description="Max results"),
-    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
-):
-    """Search Google Fonts by name."""
-    from app.services.brand_style_extractor import get_brand_extractor
-
-    extractor = get_brand_extractor()
-    fonts = await extractor.fonts_matcher.get_fonts()
-
-    if q:
-        q_lower = q.lower()
-        filtered = [f for f in fonts if q_lower in f.lower()]
-    else:
-        filtered = fonts
-
-    return FontSearchResponse(
-        fonts=filtered[:limit],
-        total=len(filtered)
-    )
-
-
-@router.post("/extract-brand-style", response_model=BrandStyleResponse)
-async def extract_brand_style(
-    data: BrandStyleExtractRequest,
-    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
-):
-    """Extract brand style (colors, font) from a website URL.
-
-    Uses Jina.ai to capture a screenshot, then Z.AI Vision to analyze
-    the visual identity and extract primary colors and font.
-    """
-    try:
-        extractor = get_brand_extractor()
-        result = await extractor.extract(data.url)
-        return BrandStyleResponse(**result)
-    except Exception as e:
-        return BrandStyleResponse(success=False, error=str(e))
 
 
 @router.get("/{channel_id}/embed/public", response_model=PublicEmbedConfig)
