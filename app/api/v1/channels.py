@@ -489,6 +489,36 @@ class BrandStyleResponse(BaseModel):
     error: Optional[str] = None
 
 
+class FontSearchResponse(BaseModel):
+    """Response for font search."""
+    fonts: List[str]
+    total: int
+
+
+@router.get("/fonts", response_model=FontSearchResponse)
+async def search_fonts(
+    q: str = Query(default="", description="Search query for font name"),
+    limit: int = Query(default=20, ge=1, le=100, description="Max results"),
+    auth: tuple = Depends(deps.verify_api_key_or_admin_token),
+):
+    """Search Google Fonts by name."""
+    from app.services.brand_style_extractor import get_brand_extractor
+
+    extractor = get_brand_extractor()
+    fonts = await extractor.fonts_matcher.get_fonts()
+
+    if q:
+        q_lower = q.lower()
+        filtered = [f for f in fonts if q_lower in f.lower()]
+    else:
+        filtered = fonts
+
+    return FontSearchResponse(
+        fonts=filtered[:limit],
+        total=len(filtered)
+    )
+
+
 @router.post("/extract-brand-style", response_model=BrandStyleResponse)
 async def extract_brand_style(
     data: BrandStyleExtractRequest,

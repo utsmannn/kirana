@@ -737,6 +737,18 @@ export function extractBrandStyle(url: string, token?: string): Promise<BrandSty
 	});
 }
 
+// ---------- Font Search ----------
+
+export interface FontSearchResponse {
+	fonts: string[];
+	total: number;
+}
+
+export function searchFonts(query: string, token?: string, limit = 20): Promise<FontSearchResponse> {
+	const params = new URLSearchParams({ q: query, limit: String(limit) });
+	return request(`/channels/fonts?${params}`, { token });
+}
+
 // ---------- WebSocket Chat ----------
 
 export interface WsMessage {

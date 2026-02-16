@@ -12,6 +12,7 @@
 		configureEmbed,
 		disableEmbed,
 		extractBrandStyle,
+		searchFonts,
 		ApiError,
 		type Provider,
 		type Channel,
@@ -73,6 +74,13 @@
 	let brandUrl = $state('');
 	let brandExtracting = $state(false);
 	let extractedGoogleFontsUrl = $state<string | null>(null);
+
+	// Font autocomplete
+	let fontSearchQuery = $state('');
+	let fontSearchResults = $state<string[]>([]);
+	let fontSearchLoading = $state(false);
+	let showFontDropdown = $state(false);
+	let fontDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 	onMount(async () => {
 		if (!adminToken.value) {
@@ -185,11 +193,12 @@
 	}
 
 	async function openEmbedModal(channel: Channel) {
-		const standardFonts = ['', 'Inter, sans-serif', "'Roboto', sans-serif", "'Open Sans', sans-serif", "'JetBrains Mono', monospace", 'Georgia, serif'];
 		embedChannel = channel;
 		embedLoading = true;
 		showEmbedModal = true;
 		extractedGoogleFontsUrl = null; // Reset
+		fontSearchQuery = ''; // Reset font search
+		fontSearchResults = [];
 		try {
 			embedConfig = await getEmbedConfig(channel.id);
 			embedForm = {
@@ -206,7 +215,10 @@
 				bubble_style: embedConfig.bubble_style || 'rounded',
 				header_title: embedConfig.header_title || ''
 			};
-			isCustomFont = !standardFonts.includes(embedForm.font_family);
+			// Set font search query from existing config
+			if (embedForm.font_family) {
+				fontSearchQuery = embedForm.font_family.replace(/, sans-serif|, serif|, monospace/g, '').replace(/'/g, '').trim();
+			}
 		} catch (err) {
 			// If no embed config exists, use defaults
 			embedConfig = null;
@@ -224,7 +236,6 @@
 				bubble_style: 'rounded',
 				header_title: ''
 			};
-			isCustomFont = false;
 		} finally {
 			embedLoading = false;
 		}
@@ -293,7 +304,7 @@
 				// Use the Google Fonts name if available
 				const fontName = result.google_fonts_name || result.font_family;
 				embedForm.font_family = fontName + ', sans-serif';
-				isCustomFont = true; // Always mark as custom when extracted
+				fontSearchQuery = fontName; // Update search query for display
 			}
 			// Store Google Fonts URL in form
 			if (result.google_fonts_url) {
@@ -322,6 +333,40 @@
 		} finally {
 			brandExtracting = false;
 		}
+	}
+
+	async function handleFontSearch(query: string) {
+		if (fontDebounceTimer) {
+			clearTimeout(fontDebounceTimer);
+		}
+
+		if (!query.trim()) {
+			fontSearchResults = [];
+			showFontDropdown = false;
+			return;
+		}
+
+		fontDebounceTimer = setTimeout(async () => {
+			fontSearchLoading = true;
+			showFontDropdown = true;
+			try {
+				const result = await searchFonts(query.trim());
+				fontSearchResults = result.fonts;
+			} catch {
+				fontSearchResults = [];
+			} finally {
+				fontSearchLoading = false;
+			}
+		}, 300);
+	}
+
+	function selectFont(fontName: string) {
+		embedForm.font_family = fontName + ', sans-serif';
+		embedForm.google_fonts_url = `https://fonts.googleapis.com/css2?family=${fontName.replace(/ /g, '+')}:wght@400;500;600;700&display=swap`;
+		fontSearchQuery = fontName;
+		showFontDropdown = false;
+		fontSearchResults = [];
+		isCustomFont = false;
 	}
 
 	function getEmbedUrl(): string {
@@ -817,36 +862,54 @@
 							<div>
 								<label class="block text-xs font-medium text-zinc-400 mb-1.5">Font Family</label>
 								<div class="relative">
-									<select 
-										value={isCustomFont ? 'custom' : embedForm.font_family}
-										onchange={(e) => {
-											const val = e.currentTarget.value;
-											if (val === 'custom') {
-												isCustomFont = true;
-											} else {
-												isCustomFont = false;
-												embedForm.font_family = val;
+									<input
+										type="text"
+										value={fontSearchQuery || embedForm.font_family?.replace(/, sans-serif|, serif|, monospace/g, '').replace(/'/g, '') || ''}
+										oninput={(e) => {
+											fontSearchQuery = e.currentTarget.value;
+											handleFontSearch(e.currentTarget.value);
+											if (!e.currentTarget.value.trim()) {
+												embedForm.font_family = '';
+												embedForm.google_fonts_url = '';
 											}
 										}}
-										class="w-full appearance-none rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-indigo-500 outline-none cursor-pointer">
-										<option value="">Default (System Sans)</option>
-										<option value="Inter, sans-serif">Inter</option>
-										<option value="'Roboto', sans-serif">Roboto</option>
-										<option value="'Open Sans', sans-serif">Open Sans</option>
-										<option value="'JetBrains Mono', monospace">JetBrains Mono</option>
-										<option value="Georgia, serif">Georgia</option>
-										<option value="custom">Custom Font...</option>
-									</select>
-									<div class="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-zinc-500">
-										<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
-									</div>
+										onfocus={() => {
+											if (fontSearchQuery || embedForm.font_family) {
+												handleFontSearch(fontSearchQuery || embedForm.font_family?.split(',')[0]?.replace(/'/g, '') || '');
+											}
+										}}
+										onblur={() => {
+											// Delay to allow click on dropdown
+											setTimeout(() => { showFontDropdown = false; }, 200);
+										}}
+										placeholder="Search Google Fonts..."
+										class="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-indigo-500 outline-none transition-all"
+									/>
+									{#if fontSearchLoading}
+										<div class="absolute right-3 top-1/2 -translate-y-1/2">
+											<svg class="h-4 w-4 animate-spin text-zinc-500" fill="none" viewBox="0 0 24 24">
+												<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+												<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+											</svg>
+										</div>
+									{/if}
+
+									<!-- Autocomplete Dropdown -->
+									{#if showFontDropdown && fontSearchResults.length > 0}
+										<div class="absolute z-50 top-full left-0 right-0 mt-1 max-h-48 overflow-y-auto rounded-lg border border-zinc-700 bg-zinc-900 shadow-xl">
+											{#each fontSearchResults.slice(0, 10) as font}
+												<button
+													type="button"
+													onclick={() => selectFont(font)}
+													class="w-full px-3 py-2 text-left text-sm text-zinc-200 hover:bg-zinc-800 transition-colors"
+												>
+													<span style="font-family: '{font}', sans-serif">{font}</span>
+												</button>
+											{/each}
+										</div>
+									{/if}
 								</div>
-								{#if isCustomFont}
-									<input type="text" 
-										bind:value={embedForm.font_family}
-										placeholder="e.g. 'Poppins', sans-serif"
-										class="mt-2 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-indigo-500 outline-none transition-all" />
-								{/if}
+								<p class="mt-1 text-[10px] text-zinc-500">Type to search Google Fonts</p>
 							</div>
 						</div>
 					</section>
