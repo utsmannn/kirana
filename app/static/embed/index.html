@@ -338,6 +338,16 @@
             const bubbleStyle = urlBubbleStyle || config?.bubble_style || 'rounded';
             document.body.className = `bubble-${bubbleStyle}`;
 
+            // Load Google Fonts if URL provided
+            const googleFontsUrl = config?.google_fonts_url;
+            if (googleFontsUrl && !document.querySelector(`link[href="${googleFontsUrl}"]`)) {
+                const link = document.createElement('link');
+                link.rel = 'stylesheet';
+                link.href = googleFontsUrl;
+                document.head.appendChild(link);
+                console.log('[THEME] Loading Google Fonts:', googleFontsUrl);
+            }
+
             // Apply font family
             const fontFamily = urlFontFamily || config?.font_family;
             if (fontFamily) {

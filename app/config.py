@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     # Jina AI Reader (for web scraping)
     JINA_API_KEY: Optional[str] = None
 
+    # Google Fonts API (for brand style matching)
+    GOOGLE_FONTS_API_KEY: Optional[str] = None
+
     # Rate Limiting
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_REQUESTS_PER_MINUTE: int = 60

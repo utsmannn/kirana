@@ -64,6 +64,7 @@
 		bg_color: '',
 		text_color: '',
 		font_family: '',
+		google_fonts_url: '',
 		bubble_style: 'rounded',
 		header_title: ''
 	});
@@ -71,6 +72,7 @@
 	// Brand style extraction
 	let brandUrl = $state('');
 	let brandExtracting = $state(false);
+	let extractedGoogleFontsUrl = $state<string | null>(null);
 
 	onMount(async () => {
 		if (!adminToken.value) {
@@ -187,6 +189,7 @@
 		embedChannel = channel;
 		embedLoading = true;
 		showEmbedModal = true;
+		extractedGoogleFontsUrl = null; // Reset
 		try {
 			embedConfig = await getEmbedConfig(channel.id);
 			embedForm = {
@@ -199,6 +202,7 @@
 				bg_color: embedConfig.bg_color || '',
 				text_color: embedConfig.text_color || '',
 				font_family: embedConfig.font_family || '',
+				google_fonts_url: embedConfig.google_fonts_url || '',
 				bubble_style: embedConfig.bubble_style || 'rounded',
 				header_title: embedConfig.header_title || ''
 			};
@@ -216,6 +220,7 @@
 				bg_color: '',
 				text_color: '',
 				font_family: '',
+				google_fonts_url: '',
 				bubble_style: 'rounded',
 				header_title: ''
 			};
@@ -285,10 +290,15 @@
 				embedForm.text_color = result.text_color;
 			}
 			if (result.font_family) {
-				embedForm.font_family = result.font_family;
-				// Check if it's a custom font
-				const standardFonts = ['', 'Inter, sans-serif', "'Roboto', sans-serif", "'Open Sans', sans-serif", "'JetBrains Mono', monospace", 'Georgia, serif'];
-				isCustomFont = !standardFonts.includes(result.font_family);
+				// Use the Google Fonts name if available
+				const fontName = result.google_fonts_name || result.font_family;
+				embedForm.font_family = fontName + ', sans-serif';
+				isCustomFont = true; // Always mark as custom when extracted
+			}
+			// Store Google Fonts URL in form
+			if (result.google_fonts_url) {
+				embedForm.google_fonts_url = result.google_fonts_url;
+				extractedGoogleFontsUrl = result.google_fonts_url;
 			}
 
 			// Determine theme based on background color brightness

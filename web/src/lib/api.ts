@@ -622,6 +622,7 @@ export interface EmbedConfig {
 	bg_color?: string;
 	text_color?: string;
 	font_family?: string;
+	google_fonts_url?: string;
 	bubble_style: string;
 }
 
@@ -638,6 +639,7 @@ export interface EmbedConfigResponse {
 	bg_color?: string;
 	text_color?: string;
 	font_family?: string;
+	google_fonts_url?: string;
 	bubble_style: string;
 }
 
@@ -722,6 +724,8 @@ export interface BrandStyleResponse {
 	bg_color?: string;
 	text_color?: string;
 	font_family?: string;
+	google_fonts_name?: string;
+	google_fonts_url?: string;
 	error?: string;
 }
 
