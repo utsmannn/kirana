@@ -3,6 +3,17 @@ from typing import Any, Dict
 
 
 class BaseTool(ABC):
+    """Base class for all tools.
+
+    Attributes:
+        internal: If True, this tool is for internal system use only and should
+                  not be exposed to users in system prompts or tool lists.
+                  The AI can still use it but won't advertise it to users.
+    """
+
+    # Default: tool is user-facing (not internal)
+    internal: bool = False
+
     @property
     @abstractmethod
     def name(self) -> str:

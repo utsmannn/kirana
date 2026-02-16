@@ -15,7 +15,7 @@
 		type SessionMessage,
 		type Channel
 	} from '$lib/api';
-	import { apiKey } from '$lib/stores.svelte';
+	import { adminToken } from '$lib/stores.svelte';
 	import { showToast } from '$lib/toast.svelte';
 	import Button from '$lib/components/Button.svelte';
 
@@ -97,7 +97,7 @@
 
 	onMount(() => {
 		async function init() {
-			if (!apiKey.value) return;
+			if (!adminToken.value) return;
 
 			// Restore stream preference
 			const savedStream = localStorage.getItem(STREAM_STORAGE_KEY);
@@ -107,7 +107,7 @@
 
 			await Promise.all([loadSessions(), loadChannels()]);
 			try {
-				const config = await getConfig(apiKey.value);
+				const config = await getConfig();
 				model = config.model || 'default';
 			} catch {
 				// config may not be available yet
@@ -153,10 +153,9 @@
 	});
 
 	async function loadSessions() {
-		if (!apiKey.value) return;
 		loadingSessions = true;
 		try {
-			const result = await getSessions(apiKey.value, 1, 50);
+			const result = await getSessions(undefined, 1, 50);
 			sessions = result.items;
 		} catch {
 			// ignore
@@ -166,10 +165,9 @@
 	}
 
 	async function loadChannels() {
-		if (!apiKey.value) return;
 		loadingChannels = true;
 		try {
-			const result = await getChannels(apiKey.value);
+			const result = await getChannels();
 			channels = result.channels || [];
 			const defaultChannel = result.default_channel;
 			if (defaultChannel) {
@@ -185,12 +183,11 @@
 	}
 
 	async function selectSession(session: Session) {
-		if (!apiKey.value) return;
 		currentSessionId = session.id;
 		showSessions = false;
 
 		try {
-			const resp = await getSessionMessages(session.id, apiKey.value ?? undefined);
+			const resp = await getSessionMessages(session.id);
 			messages = (resp.messages || []).map((m: SessionMessage) => ({
 				role: m.role as 'user' | 'assistant',
 				content: m.content
@@ -204,7 +201,7 @@
 
 	async function handleNewSession(e: Event) {
 		e.preventDefault();
-		if (!apiKey.value || !sessionName.trim()) return;
+		if (!sessionName.trim()) return;
 
 		creatingSess = true;
 		try {
@@ -212,7 +209,7 @@
 				name: sessionName.trim(),
 				channel_id: selectedChannelId || undefined
 			};
-			const session = await createSession(sessionData, apiKey.value ?? undefined);
+			const session = await createSession(sessionData);
 			sessions = [session, ...sessions];
 			currentSessionId = session.id;
 			messages = [];
@@ -240,7 +237,6 @@
 	}
 
 	async function resumeStream(resume: ResumeState) {
-		if (!apiKey.value) return;
 		streaming = true;
 		resuming = true;
 
@@ -249,7 +245,7 @@
 			if (resume.session_id) {
 				currentSessionId = resume.session_id;
 				try {
-					const resp = await getSessionMessages(resume.session_id, apiKey.value ?? undefined);
+					const resp = await getSessionMessages(resume.session_id);
 					const loaded = (resp.messages || []).map((m: SessionMessage) => ({
 						role: m.role as 'user' | 'assistant',
 						content: m.content
@@ -282,7 +278,7 @@
 
 			while (!done && retries < 3) {
 				try {
-					const result = await getStreamChunks(resume.stream_id, apiKey.value ?? undefined, offset);
+					const result = await getStreamChunks(resume.stream_id, undefined, offset);
 					retries = 0;
 
 					for (const chunk of result.chunks) {
@@ -318,7 +314,7 @@
 	}
 
 	async function doSendMessage() {
-		if (!input.trim() || streaming || !apiKey.value) return;
+		if (!input.trim() || streaming) return;
 
 		const activeSessionId = currentSessionId;
 		const userMessage = input.trim();
@@ -357,7 +353,7 @@
 					stream: true,
 					stream_id: streamId,
 					session_id: activeSessionId ?? undefined
-				}, apiKey.value ?? undefined, (sid: string) => {
+				}, undefined, (sid: string) => {
 					// Update resume state with stream_id
 					pendingResume = {
 						stream_id: sid,
@@ -379,7 +375,7 @@
 					messages: apiMessages,
 					stream: false,
 					session_id: activeSessionId ?? undefined
-				}, apiKey.value ?? undefined);
+				}, undefined);
 
 				const content = response.choices?.[0]?.message?.content || '';
 				messages[assistantIdx] = { role: 'assistant', content };
@@ -549,9 +545,9 @@
 							</div>
 							<p class="text-lg font-medium text-zinc-300">Start a conversation</p>
 							<p class="mt-1 text-sm text-zinc-500">
-								{apiKey.value
+								{adminToken.value
 									? 'Send a message to begin chatting with your AI'
-									: 'Connect a client first from the Dashboard'}
+									: 'Please log in to start chatting'}
 							</p>
 						</div>
 					</div>
@@ -617,16 +613,16 @@
 					<input
 						type="text"
 						bind:value={input}
-						placeholder={apiKey.value
+						placeholder={adminToken.value
 							? 'Type your message...'
-							: 'Connect a client first'}
-						disabled={streaming || !apiKey.value}
+							: 'Please log in'}
+						disabled={streaming || !adminToken.value}
 						onkeydown={handleKeydown}
 						class="flex-1 rounded-xl border border-zinc-700 bg-zinc-800 px-4 py-3 text-sm text-zinc-100 placeholder-zinc-500 transition-colors focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-none disabled:opacity-50"
 					/>
 					<Button
 						onclick={() => doSendMessage()}
-						disabled={!input.trim() || streaming || !apiKey.value}
+						disabled={!input.trim() || streaming || !adminToken.value}
 						loading={streaming}
 					>
 						Send

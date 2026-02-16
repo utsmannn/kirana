@@ -11,7 +11,7 @@
 		type SessionMessage,
 		type SessionMessagesResponse
 	} from '$lib/api';
-	import { apiKey } from '$lib/stores.svelte';
+	import { adminToken } from '$lib/stores.svelte';
 	import { showToast } from '$lib/toast.svelte';
 	import { goto } from '$app/navigation';
 	import Button from '$lib/components/Button.svelte';
@@ -26,13 +26,13 @@
 	const sessionId = $derived(page.params.id);
 
 	onMount(async () => {
-		if (!apiKey.value || !sessionId) return;
+		if (!adminToken.value || !sessionId) return;
 
 		loading = true;
 		try {
 			const [sess, msgsResp] = await Promise.all([
-				getSession(sessionId, apiKey.value ?? undefined),
-				getSessionMessages(sessionId, apiKey.value ?? undefined)
+				getSession(sessionId),
+				getSessionMessages(sessionId)
 			]);
 			session = sess;
 			messages = msgsResp.messages || [];
@@ -46,11 +46,11 @@
 	});
 
 	async function handleDelete() {
-		if (!apiKey.value || !sessionId) return;
+		if (!sessionId) return;
 
 		deleting = true;
 		try {
-			await deleteSession(sessionId, apiKey.value ?? undefined);
+			await deleteSession(sessionId);
 			showToast('Session deleted', 'success');
 			goto(`${base}/sessions`);
 		} catch (err) {

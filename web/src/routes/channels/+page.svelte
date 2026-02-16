@@ -19,7 +19,7 @@
 		type ToolsResponse,
 		type EmbedConfigResponse
 	} from '$lib/api';
-	import { apiKey } from '$lib/stores.svelte';
+	import { adminToken } from '$lib/stores.svelte';
 	import { showToast } from '$lib/toast.svelte';
 	import Button from '$lib/components/Button.svelte';
 	import Modal from '$lib/components/Modal.svelte';
@@ -67,7 +67,7 @@
 	});
 
 	onMount(async () => {
-		if (!apiKey.value) {
+		if (!adminToken.value) {
 			loading = false;
 			return;
 		}
@@ -78,9 +78,9 @@
 		loading = true;
 		try {
 			const [providersResult, channelsResult, toolsResult] = await Promise.all([
-				getProviders(apiKey.value ?? undefined),
-				getChannels(apiKey.value ?? undefined).catch(() => ({ channels: [], default_channel: null })),
-				getTools(apiKey.value ?? undefined).catch(() => ({ tools: [] }))
+				getProviders(),
+				getChannels().catch(() => ({ channels: [], default_channel: null })),
+				getTools().catch(() => ({ tools: [] }))
 			]);
 
 			providers = providersResult.providers || [];
@@ -110,7 +110,6 @@
 	}
 
 	async function handleSaveChannel() {
-		if (!apiKey.value) return;
 		if (!channelForm.name || !channelForm.provider_id) {
 			showToast('Name and provider are required', 'error');
 			return;
@@ -128,10 +127,10 @@
 			};
 
 			if (editingChannel) {
-				await updateChannel(editingChannel.id, data, apiKey.value ?? undefined);
+				await updateChannel(editingChannel.id, data);
 				showToast('Channel updated', 'success');
 			} else {
-				await createChannel(data, apiKey.value ?? undefined);
+				await createChannel(data);
 				showToast('Channel created', 'success');
 			}
 			showChannelModal = false;
@@ -148,7 +147,6 @@
 	}
 
 	async function handleDeleteChannel(channel: Channel) {
-		if (!apiKey.value) return;
 		if (channel.is_default) {
 			showToast('Cannot delete default channel', 'error');
 			return;
@@ -156,7 +154,7 @@
 		if (!confirm(`Delete channel "${channel.name}"?`)) return;
 
 		try {
-			await deleteChannel(channel.id, apiKey.value ?? undefined);
+			await deleteChannel(channel.id);
 			showToast('Channel deleted', 'success');
 			await loadData();
 		} catch (err) {
@@ -167,9 +165,8 @@
 	}
 
 	async function handleSetDefaultChannel(channel: Channel) {
-		if (!apiKey.value) return;
 		try {
-			await setDefaultChannel(channel.id, apiKey.value ?? undefined);
+			await setDefaultChannel(channel.id);
 			showToast(`"${channel.name}" is now default channel`, 'success');
 			await loadData();
 		} catch (err) {
@@ -180,12 +177,11 @@
 	}
 
 	async function openEmbedModal(channel: Channel) {
-		if (!apiKey.value) return;
 		embedChannel = channel;
 		embedLoading = true;
 		showEmbedModal = true;
 		try {
-			embedConfig = await getEmbedConfig(channel.id, apiKey.value ?? undefined);
+			embedConfig = await getEmbedConfig(channel.id);
 			embedForm = {
 				public: embedConfig.public,
 				save_history: embedConfig.save_history,
@@ -220,10 +216,10 @@
 	}
 
 	async function handleSaveEmbed() {
-		if (!apiKey.value || !embedChannel) return;
+		if (!embedChannel) return;
 		embedSaving = true;
 		try {
-			embedConfig = await configureEmbed(embedChannel.id, embedForm, apiKey.value ?? undefined);
+			embedConfig = await configureEmbed(embedChannel.id, embedForm);
 			showToast('Embed configuration saved', 'success');
 		} catch (err) {
 			if (err instanceof ApiError) {
@@ -237,11 +233,11 @@
 	}
 
 	async function handleDisableEmbed() {
-		if (!apiKey.value || !embedChannel) return;
+		if (!embedChannel) return;
 		if (!confirm('Disable embed for this channel?')) return;
 		embedSaving = true;
 		try {
-			await disableEmbed(embedChannel.id, apiKey.value ?? undefined);
+			await disableEmbed(embedChannel.id);
 			embedConfig = null;
 			showToast('Embed disabled', 'success');
 		} catch (err) {

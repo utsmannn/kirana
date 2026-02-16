@@ -23,13 +23,25 @@ class ToolRegistry:
         return self._tools.get(name)
 
     def list_tools(self) -> List[BaseTool]:
+        """List all registered tools."""
         return list(self._tools.values())
 
-    def to_openai_tools(self, enabled_tools: List[str] = None) -> List[Dict[str, Any]]:
+    def list_user_tools(self) -> List[BaseTool]:
+        """List only user-facing tools (excludes internal tools)."""
+        return [tool for tool in self._tools.values() if not tool.internal]
+
+    def to_openai_tools(self, enabled_tools: List[str] = None, include_internal: bool = True) -> List[Dict[str, Any]]:
+        """Convert tools to OpenAI format.
+
+        Args:
+            enabled_tools: Optional list of tool names to include. If None, includes all.
+            include_internal: If False, excludes internal tools from the output.
+        """
         return [
             tool.to_openai_tool()
             for name, tool in self._tools.items()
-            if enabled_tools is None or name in enabled_tools
+            if (enabled_tools is None or name in enabled_tools)
+            and (include_internal or not tool.internal)
         ]
 
 

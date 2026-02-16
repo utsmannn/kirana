@@ -12,7 +12,7 @@
 		type KnowledgeItem,
 		type PaginatedResponse
 	} from '$lib/api';
-	import { apiKey } from '$lib/stores.svelte';
+	import { adminToken } from '$lib/stores.svelte';
 	import { showToast } from '$lib/toast.svelte';
 	import Button from '$lib/components/Button.svelte';
 	import Modal from '$lib/components/Modal.svelte';
@@ -61,7 +61,7 @@
 
 	// Helper to build file URL with auth
 	function getFileUrl(itemId: string): string {
-		return `/v1/knowledge/${itemId}/download?api_key=${encodeURIComponent(apiKey.value ?? '')}`;
+		return `/v1/knowledge/${itemId}/download?api_key=${encodeURIComponent(adminToken.value ?? '')}`;
 	}
 
 	const modalTitle = $derived(editing ? 'Edit Knowledge Entry' : 'New Knowledge Entry');
@@ -71,14 +71,14 @@
 	});
 
 	async function loadItems() {
-		if (!apiKey.value) {
+		if (!adminToken.value) {
 			loading = false;
 			return;
 		}
 		loading = true;
 		try {
 			const result: PaginatedResponse<KnowledgeItem> = await getKnowledge(
-				apiKey.value,
+				undefined,
 				currentPage,
 				20,
 				search
@@ -142,7 +142,7 @@
 
 	async function handleUpload(e: Event) {
 		e.preventDefault();
-		if (!apiKey.value || !selectedFile) return;
+		if (!selectedFile) return;
 
 		uploading = true;
 		uploadProgress = 0;
@@ -161,7 +161,7 @@
 		}
 
 		try {
-			await uploadKnowledgeFile(selectedFile, apiKey.value ?? undefined, formTitle.trim() || undefined);
+			await uploadKnowledgeFile(selectedFile, formTitle.trim() || undefined);
 			showToast('File uploaded successfully', 'success');
 			modalOpen = false;
 			selectedFile = null;
@@ -186,7 +186,7 @@
 
 	async function handleWebScrape(e: Event) {
 		e.preventDefault();
-		if (!apiKey.value || !webUrl.trim()) return;
+		if (!webUrl.trim()) return;
 
 		// Normalize URL - add https:// if missing
 		let url = webUrl.trim();
@@ -206,7 +206,7 @@
 
 		try {
 			if (crawlMode === 'single') {
-				const result = await scrapeWebUrl(url, apiKey.value ?? undefined);
+				const result = await scrapeWebUrl(url, undefined);
 				if (result.success) {
 					showToast(`Scraped: ${result.title}`, 'success');
 					modalOpen = false;
@@ -216,7 +216,7 @@
 					showToast(result.error || 'Failed to scrape URL', 'error');
 				}
 			} else {
-				const result = await crawlWebsite(url, apiKey.value ?? undefined, {
+				const result = await crawlWebsite(url, undefined, {
 					max_pages: crawlMaxPages,
 					max_depth: crawlMaxDepth,
 					path_prefix: crawlPathPrefix.trim() || undefined
@@ -264,7 +264,7 @@
 			return;
 		}
 
-		if (!apiKey.value || !formTitle.trim() || !formContent.trim()) return;
+		if (!formTitle.trim() || !formContent.trim()) return;
 
 		saving = true;
 		try {
@@ -272,14 +272,14 @@
 				await updateKnowledge(editing.id, {
 					title: formTitle.trim(),
 					content: formContent.trim()
-				}, apiKey.value ?? undefined);
+				});
 				showToast('Entry updated', 'success');
 			} else {
 				await createKnowledge({
 					title: formTitle.trim(),
 					content: formContent.trim(),
 					content_type: formContentType
-				}, apiKey.value ?? undefined);
+				});
 				showToast('Entry created', 'success');
 			}
 			modalOpen = false;
@@ -298,11 +298,11 @@
 	}
 
 	async function handleDelete() {
-		if (!apiKey.value || !deleteTarget) return;
+		if (!deleteTarget) return;
 
 		deleting = true;
 		try {
-			await deleteKnowledge(deleteTarget.id, apiKey.value ?? undefined);
+			await deleteKnowledge(deleteTarget.id);
 			showToast('Entry deleted', 'success');
 			deleteTarget = null;
 			await loadItems();

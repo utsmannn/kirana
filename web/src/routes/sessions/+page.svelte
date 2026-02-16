@@ -11,7 +11,7 @@
 		type PaginatedResponse,
 		type Channel
 	} from '$lib/api';
-	import { apiKey } from '$lib/stores.svelte';
+	import { adminToken } from '$lib/stores.svelte';
 	import { showToast } from '$lib/toast.svelte';
 	import Button from '$lib/components/Button.svelte';
 	import Modal from '$lib/components/Modal.svelte';
@@ -42,14 +42,14 @@
 	});
 
 	async function loadSessions() {
-		if (!apiKey.value) {
+		if (!adminToken.value) {
 			loading = false;
 			return;
 		}
 		loading = true;
 		try {
 			const result: PaginatedResponse<Session> = await getSessions(
-				apiKey.value,
+				undefined,
 				currentPage,
 				20
 			);
@@ -66,9 +66,8 @@
 	}
 
 	async function loadChannels() {
-		if (!apiKey.value) return;
 		try {
-			const result = await getChannels(apiKey.value);
+			const result = await getChannels();
 			channels = result.channels || [];
 			defaultChannel = result.default_channel;
 			// Pre-select default channel
@@ -83,7 +82,7 @@
 	}
 
 	async function handleCreateSession() {
-		if (!apiKey.value || !newSessionName.trim()) return;
+		if (!newSessionName.trim()) return;
 
 		creating = true;
 		try {
@@ -91,7 +90,7 @@
 				name: newSessionName.trim(),
 				channel_id: selectedChannelId || undefined
 			};
-			const session = await createSession(sessionData, apiKey.value ?? undefined);
+			const session = await createSession(sessionData);
 			showToast('Session created', 'success');
 			showCreateModal = false;
 			newSessionName = '';
@@ -118,11 +117,11 @@
 	}
 
 	async function handleDelete() {
-		if (!apiKey.value || !deleteTarget) return;
+		if (!deleteTarget) return;
 
 		deleting = true;
 		try {
-			await deleteSession(deleteTarget.id, apiKey.value ?? undefined);
+			await deleteSession(deleteTarget.id);
 			showToast('Session deleted', 'success');
 			deleteTarget = null;
 			await loadSessions();

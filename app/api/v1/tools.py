@@ -20,9 +20,21 @@ class ToolExecuteRequest(BaseModel):
 async def list_tools(
     auth: tuple = Depends(deps.verify_api_key_or_admin_token)
 ):
-    """List all available tools."""
-    tools = tool_registry.list_tools()
-    return {"tools": [tool.to_openai_tool() for tool in tools]}
+    """List all available user-facing tools (excludes internal tools).
+
+    Returns tools in a simple format for UI display:
+    {"tools": [{"name": "...", "description": "..."}, ...]}
+    """
+    tools = tool_registry.list_user_tools()
+    return {
+        "tools": [
+            {
+                "name": tool.name,
+                "description": tool.description
+            }
+            for tool in tools
+        ]
+    }
 
 
 @router.post("/execute")

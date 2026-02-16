@@ -17,7 +17,15 @@ UPLOAD_DIR = Path("/app/uploads/knowledge")
 
 
 class ImageAnalyzerTool(BaseTool):
-    """Tool for analyzing images using MCP server (Z.AI GLM Vision)."""
+    """Tool for analyzing images using MCP server (Z.AI GLM Vision).
+
+    This is an internal tool - not exposed to users in system prompts.
+    The system uses it for processing uploaded images in knowledge base,
+    but users shouldn't know about it directly.
+    """
+
+    # Mark as internal - don't expose to users
+    internal: bool = True
 
     @property
     def name(self) -> str:

@@ -82,11 +82,11 @@ class ChatService:
                 guard_prompt = self._build_knowledge_only_guard()
                 prompt = guard_prompt + "\n\n" + prompt
 
-        # Add available tools info to system prompt
-        tools = tool_registry.list_tools()
-        if tools:
+        # Add available tools info to system prompt (only user-facing tools)
+        user_tools = tool_registry.list_user_tools()
+        if user_tools:
             prompt += "\n\nYou have access to the following tools:\n"
-            for tool in tools:
+            for tool in user_tools:
                 prompt += f"- {tool.name}: {tool.description}\n"
             prompt += "\nUse the tools when they would help answer the user's question."
 
@@ -291,11 +291,12 @@ Anda memiliki akses ke knowledge base yang telah disediakan.
         }
 
         # Add tools if available and not disabled
-        available_tools = tool_registry.list_tools()
-        if available_tools:
-            completion_kwargs["tools"] = [tool.to_openai_tool() for tool in available_tools]
+        # Only pass user-facing tools to LLM (internal tools are for system use only)
+        user_tools = tool_registry.list_user_tools()
+        if user_tools:
+            completion_kwargs["tools"] = [tool.to_openai_tool() for tool in user_tools]
             completion_kwargs["tool_choice"] = request.tool_choice or "auto"
-            logger.info("[TOOL] Passing %d tools to LLM", len(available_tools))
+            logger.info("[TOOL] Passing %d user-facing tools to LLM", len(user_tools))
 
         if settings.OPENAI_BASE_URL:
             completion_kwargs["api_base"] = settings.OPENAI_BASE_URL
