@@ -586,6 +586,7 @@
 <Modal
 	open={showEmbedModal}
 	onClose={() => (showEmbedModal = false)}
+	closable={!brandExtracting}
 	title="Embed Configuration"
 	size="xl"
 >
@@ -689,31 +690,31 @@
 									</svg>
 									<span class="text-xs font-semibold text-indigo-300">Extract Style from Brand</span>
 								</div>
-								<p class="text-[10px] text-zinc-500 mb-2">Enter a website URL to automatically extract colors and font</p>
-								<div class="flex gap-2">
+								<p class="text-[10px] text-zinc-500 mb-3">Enter a website URL to automatically extract colors and font</p>
+								<div class="space-y-2">
 									<input
 										type="url"
 										bind:value={brandUrl}
 										placeholder="https://example.com"
 										disabled={brandExtracting}
-										class="flex-1 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-200 focus:border-indigo-500 outline-none transition-all disabled:opacity-50"
+										class="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-indigo-500 outline-none transition-all disabled:opacity-50"
 									/>
 									<button
 										onclick={handleExtractBrandStyle}
 										disabled={brandExtracting || !brandUrl.trim()}
-										class="px-3 py-1.5 rounded-lg bg-indigo-600 text-xs font-medium text-white hover:bg-indigo-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5 shrink-0"
+										class="w-full px-3 py-2 rounded-lg bg-indigo-600 text-sm font-medium text-white hover:bg-indigo-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
 									>
 										{#if brandExtracting}
-											<svg class="h-3 w-3 animate-spin" fill="none" viewBox="0 0 24 24">
+											<svg class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
 												<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
 												<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
 											</svg>
 											Extracting...
 										{:else}
-											<svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
 											</svg>
-											Extract
+											Extract Style
 										{/if}
 									</button>
 								</div>
@@ -844,11 +845,11 @@
 				<!-- Modal Actions -->
 				<div class="mt-8 pt-6 border-t border-zinc-800 flex flex-col gap-2">
 					<div class="flex gap-2">
-						<Button class="flex-1" variant="secondary" size="sm" onclick={() => (showEmbedModal = false)}>Cancel</Button>
+						<Button class="flex-1" variant="secondary" size="sm" onclick={() => (showEmbedModal = false)} disabled={brandExtracting}>Cancel</Button>
 						{#if embedConfig?.embed_enabled}
-							<Button class="flex-1" size="sm" onclick={handleSaveEmbed} loading={embedSaving}>Update</Button>
+							<Button class="flex-1" size="sm" onclick={handleSaveEmbed} loading={embedSaving} disabled={brandExtracting}>Update</Button>
 						{:else}
-							<Button class="flex-1" size="sm" onclick={handleSaveEmbed} loading={embedSaving}>Enable</Button>
+							<Button class="flex-1" size="sm" onclick={handleSaveEmbed} loading={embedSaving} disabled={brandExtracting}>Enable</Button>
 						{/if}
 					</div>
 					{#if embedConfig?.embed_enabled}
