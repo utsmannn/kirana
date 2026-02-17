@@ -4,7 +4,7 @@ import { adminToken } from './stores.svelte';
 
 export function requireAdmin(): boolean {
 	if (!adminToken.value) {
-		goto(`${base}/login`);
+		goto(`${base}/panel/login`);
 		return false;
 	}
 	return true;
@@ -12,5 +12,5 @@ export function requireAdmin(): boolean {
 
 export function logout(): void {
 	adminToken.value = null;
-	goto(`${base}/login`);
+	goto(`${base}/panel/login`);
 }

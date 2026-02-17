@@ -21,8 +21,8 @@ function handleUnauthorized() {
 	// Clear auth state
 	adminToken.value = null;
 	apiKey.value = null;
-	// Redirect to login
-	goto('/login');
+	// Redirect to panel login
+	goto('/panel/login');
 }
 
 async function request<T>(
