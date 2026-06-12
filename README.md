@@ -8,15 +8,15 @@ Deploy once. Use everywhere — REST API, WebSocket, embeddable chat widget, or 
 
 ## What Kirana Does
 
-```
-                     ┌──────────────────────────────┐
-                     │         Kirana Server          │
-                     │                                │
-  Client ──────────▶ │  Auth → Channel → RAG → LLM   │ ────▶ AI Provider
-  (simple HTTP)      │                                │        (OpenAI, Z.AI,
-                     │  Tools: knowledge, datetime,   │         any compatible)
-                     │  web search, image analysis    │
-                     └──────────────────────────────┘
+```mermaid
+flowchart LR
+    C[Client<br/>simple HTTP] --> K[Kirana Server]
+    subgraph K[Kirana Server]
+        direction LR
+        A[Auth] --> CH[Channel] --> R[RAG] --> L[LLM]
+        T[Tools:<br/>knowledge<br/>datetime<br/>image analysis]
+    end
+    K --> P[AI Provider<br/>OpenAI, Z.AI,<br/>any compatible]
 ```
 
 **Kirana is the middle layer.** Clients send plain HTTP requests. Kirana handles authentication, channels, tool execution, knowledge retrieval (RAG), and LLM communication. Clients don't need OpenAI SDKs, don't manage prompts, don't configure tools.
@@ -173,39 +173,47 @@ Open **http://localhost:8000/panel** for the admin dashboard.
 
 This is the core knowledge system. Every uploaded document goes through this pipeline:
 
-```
-Document (PDF/DOCX/XLSX/TXT/CSV)
-    │
-    ▼
-┌──────────────┐
-│  LiteParse   │  OCR-enabled smart parsing (Indonesian OCR).
-│  Parser      │  Falls back to generic extraction.
-└──────┬───────┘
-       │ ParsedDocument (text + page/bbox/font metadata)
-       ▼
-┌──────────────┐
-│  Chunking    │  tiktoken cl100k_base. 800-token chunks.
-│              │  120-token overlap. Paragraph-aware splitting.
-└──────┬───────┘
-       │ List[RagChunk] (text + provenance metadata)
-       ▼
-┌──────────────┐
-│  Embedding   │  FastEmbed: paraphrase-multilingual-MiniLM-L12-v2
-│              │  Dimension: 384. Batched (32 at a time).
-└──────┬───────┘
-       │ KnowledgeChunk rows with pgvector embeddings
-       ▼
-┌──────────────┐
-│  pgvector    │  HNSW index. Cosine distance.
-│  Storage     │  Stores embeddings + metadata.
-└──────┬───────┘
-       │
-       ▼
-┌──────────────┐
-│  Retrieval   │  On chat: embed user query → cosine search
-│  (at query   │  → deduplicate → top-10 chunks → format as
-│   time)      │  [S1], [S2] citations → inject into LLM context
-└──────────────┘
+```mermaid
+flowchart TD
+    D[Document<br/>PDF/DOCX/XLSX/TXT/CSV] --> P
+
+    subgraph P[LiteParse Parser]
+        OCR[OCR-enabled smart parsing<br/>Indonesian OCR language]
+        FB[Falls back to generic extraction]
+    end
+
+    P --> PD[ParsedDocument<br/>text + page/bbox/font metadata]
+
+    subgraph CH[Chunking]
+        TK[tiktoken cl100k_base<br/>800-token chunks<br/>120-token overlap<br/>Paragraph-aware splitting]
+    end
+
+    PD --> CH
+    CH --> RC[List of RagChunk<br/>text + provenance metadata]
+
+    subgraph EM[Embedding]
+        FE[FastEmbed<br/>paraphrase-multilingual-MiniLM-L12-v2<br/>Dimension: 384<br/>Batched: 32 at a time]
+    end
+
+    RC --> EM
+
+    subgraph PG[pgvector Storage]
+        HNSW[HNSW index<br/>Cosine distance<br/>Stores embeddings + metadata]
+    end
+
+    EM --> PG
+
+    subgraph RET[Retrieval at Query Time]
+        EMB[Embed user query]
+        COS[Cosine similarity search]
+        DEDUP[Deduplicate]
+        TOP[Top-10 chunks]
+        FMT[Format as S1 S2 citations]
+        INJ[Inject into LLM context]
+        EMB --> COS --> DEDUP --> TOP --> FMT --> INJ
+    end
+
+    PG --> RET
 ```
 
 **Key design decisions:**
@@ -215,49 +223,24 @@ Document (PDF/DOCX/XLSX/TXT/CSV)
 
 ### Chat Flow
 
-```
-POST /v1/chat/completions
-    │
-    ▼
-1. Authenticate (API key / admin token / embed token / client API key)
-    │
-    ▼
-2. Resolve Channel → get provider credentials, personality, context guard
-    │
-    ▼
-3. Build system prompt (personality + context guard + tool definitions)
-    │
-    ▼
-4. Retrieve RAG context (embed user query → pgvector search → format citations)
-    │
-    ▼
-5. Inject RAG context into system prompt (deterministic, not tool-based)
-    │
-    ▼
-6. Call LLM via OpenAI SDK (using channel's provider — not .env fallback)
-    │
-    ▼
-7. Stream or return response
+```mermaid
+flowchart TD
+    A[POST /v1/chat/completions] --> B[1. Authenticate<br/>API key / admin token / embed token / client key]
+    B --> C[2. Resolve Channel<br/>Get provider credentials, personality, context guard]
+    C --> D[3. Build System Prompt<br/>Personality + context guard + tool definitions]
+    D --> E[4. Retrieve RAG Context<br/>Embed query → pgvector search → format citations]
+    E --> F[5. Inject RAG Context<br/>Deterministic, not tool-based]
+    F --> G[6. Call LLM via OpenAI SDK<br/>Using channel provider, not .env fallback]
+    G --> H[7. Stream or Return Response]
 ```
 
 ### Provider + Channel Model
 
-```
-┌──────────────────┐
-│ ProviderCredential│  ← API key, base URL, model name
-│ (one per AI API)  │
-└────────┬─────────┘
-         │ 1:N
-         ▼
-┌──────────────────┐
-│     Channel       │  ← Personality, system prompt, tools, context guard
-│ (one per use-case)│
-└────────┬─────────┘
-         │ 1:N
-         ▼
-┌──────────────────┐
-│     Session       │  ← Individual chat conversations
-└──────────────────┘
+```mermaid
+flowchart TD
+    PC[ProviderCredential<br/>API key, base URL, model name<br/>One per AI API] -->|1:N| CH
+    CH[Channel<br/>Personality, system prompt<br/>tools, context guard<br/>One per use case] -->|1:N| S
+    S[Session<br/>Individual chat conversations]
 ```
 
 **Why this way:** One provider can power many channels (e.g., "Support Bot", "Sales Assistant", "Code Reviewer"), each with different personalities, tools, and knowledge scope. Clients just specify a `channel_id`.

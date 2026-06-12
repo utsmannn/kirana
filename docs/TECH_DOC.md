@@ -28,73 +28,55 @@
 
 ### 1.1 Request Flow
 
-```
-HTTP Request
-    │
-    ▼
-┌──────────────────┐
-│  FastAPI Router   │  Route matching (/v1/...)
-└──────┬───────────┘
-       │
-       ▼
-┌──────────────────┐
-│  Auth Dependency  │  Bearer token → API key / admin token / client key / embed token
-└──────┬───────────┘
-       │
-       ▼
-┌──────────────────┐
-│  Rate Limiter     │  Redis-backed sliding window
-└──────┬───────────┘
-       │
-       ▼
-┌──────────────────┐
-│  Endpoint Logic   │  CRUD / chat / upload / etc.
-└──────┬───────────┘
-       │
-       ▼
-┌──────────────────┐
-│  AsyncSession     │  PostgreSQL via SQLAlchemy async
-│  + Redis          │
-└──────────────────┘
+```mermaid
+flowchart TD
+    HTTP[HTTP Request] --> Router
+    Router[FastAPI Router<br/>Route matching /v1/...] --> Auth
+    Auth[Auth Dependency<br/>Bearer token → API key / admin / client key / embed token] --> RL
+    RL[Rate Limiter<br/>Redis-backed sliding window] --> Logic
+    Logic[Endpoint Logic<br/>CRUD / chat / upload / etc.] --> DB
+    DB[(AsyncSession<br/>PostgreSQL via SQLAlchemy<br/>+ Redis)]
 ```
 
 ### 1.2 Component Diagram
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                         KIRANA SERVER                            │
-│                                                                  │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────────────┐  │
-│  │ Admin    │  │ Chat API │  │ Knowledge│  │ Embed Widget  │  │
-│  │ Panel    │  │ (REST+WS)│  │ API      │  │ (iframe+SSE)  │  │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └───────┬───────┘  │
-│       │             │             │                 │           │
-│       └─────────────┼─────────────┼─────────────────┘           │
-│                     │             │                              │
-│                     ▼             ▼                              │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │                   Chat Service                            │   │
-│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────┐  │   │
-│  │  │ System   │  │ RAG      │  │ Provider │  │ Stream  │  │   │
-│  │  │ Prompt   │  │ Injection│  │ Resolver │  │ Buffer  │  │   │
-│  │  │ Builder  │  │          │  │          │  │         │  │   │
-│  │  └──────────┘  └──────────┘  └──────────┘  └─────────┘  │   │
-│  └──────────────────────────────────────────────────────────┘   │
-│                                                                  │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │                   RAG Services                             │   │
-│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────┐  │   │
-│  │  │ LiteParse│  │ Chunking │  │ Embedding│  │Retrieval│  │   │
-│  │  │ Parser   │  │(tiktoken)│  │(FastEmbed│  │(pgvector│  │   │
-│  │  │          │  │          │  │ 384d)    │  │ cosine) │  │   │
-│  │  └──────────┘  └──────────┘  └──────────┘  └─────────┘  │   │
-│  └──────────────────────────────────────────────────────────┘   │
-│                                                                  │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────────────┐  │
-│  │ Session  │  │ Tool     │  │ File     │  │ MCP Client    │  │
-│  │ Manager  │  │ Registry │  │ Processor│  │               │  │
-│  └──────────┘  └──────────┘  └──────────┘  └───────────────┘  │
-└──────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph API[API Layer]
+        Admin[Admin Panel]
+        Chat[Chat API<br/>REST + WS]
+        Knowledge[Knowledge API]
+        Embed[Embed Widget<br/>iframe + SSE]
+    end
+
+    subgraph Core[Core Services]
+        CS[Chat Service]
+        subgraph CS_Internals[Chat Service Internals]
+            SP[System Prompt Builder]
+            RI[RAG Injection]
+            PR[Provider Resolver]
+            SB[Stream Buffer]
+        end
+        CS --- CS_Internals
+    end
+
+    subgraph RAG[RAG Services]
+        LP[LiteParse Parser]
+        CK[Chunking<br/>tiktoken]
+        EM[Embedding<br/>FastEmbed 384d]
+        RV[Retrieval<br/>pgvector cosine]
+    end
+
+    subgraph Infra[Infrastructure]
+        SM[Session Manager]
+        TR[Tool Registry]
+        FP[File Processor]
+        MC[MCP Client]
+    end
+
+    API --> Core
+    Core --> RAG
+    Core --> Infra
 ```
 
 ### 1.3 Technology Stack
@@ -122,91 +104,64 @@ HTTP Request
 
 Kirana uses **deterministic RAG**, not tool-based. The knowledge retrieval happens automatically before every chat completion — the LLM doesn't decide whether to search.
 
+**Write path — Knowledge ingestion:**
+
+```mermaid
+flowchart TD
+    UP[Document Upload] --> FS[File Saved<br/>→ /uploads/knowledge/uuid.ext]
+    FS --> PA
+
+    subgraph PA[Parse]
+        LP[LiteParse — PDF/DOCX → ParsedDocument]
+        DR[Direct read — TXT/CSV/MD/JSON]
+        FB[FileProcessor — legacy fallback]
+    end
+
+    PA --> CH
+
+    subgraph CH[Chunk — tiktoken cl100k_base]
+        SP[Split by paragraphs]
+        TK[800 tokens max per chunk]
+        OV[120 tokens overlap]
+        PV[Preserve page/bbox/font metadata]
+    end
+
+    CH --> RC[List of RagChunk<br/>text + provenance metadata]
+
+    subgraph EM[Embed — FastEmbed async asyncio.to_thread]
+        FE[Model: paraphrase-multilingual-MiniLM-L12-v2]
+        DIM[Dimension: 384]
+        BAT[Batch: 32 texts at a time]
+    end
+
+    RC --> EM
+
+    subgraph ST[Store — INSERT INTO knowledge_chunks]
+        TXT[text, chunk_index, token_count]
+        VEC[embedding VECTOR 384]
+        META[extra_metadata JSONB — provenance]
+    end
+
+    EM --> ST
 ```
-KNOWLEDGE INGESTION (write path)
-═══════════════════════════════════
 
-  Document Upload
-       │
-       ▼
-  ┌─────────────┐
-  │ File Saved   │  → /uploads/knowledge/{uuid}.{ext}
-  └──────┬──────┘
-         │
-         ▼
-  ┌─────────────┐
-  │ Parse        │  LiteParse (PDF/DOCX) → ParsedDocument
-  │              │  Direct read (TXT/CSV/MD/JSON)
-  │              │  FileProcessor (legacy fallback)
-  └──────┬──────┘
-         │
-         ▼
-  ┌─────────────┐
-  │ Chunk        │  tiktoken cl100k_base
-  │              │  • Split by paragraphs
-  │              │  • 800 tokens max per chunk
-  │              │  • 120 tokens overlap
-  │              │  • Preserve page/bbox/font metadata
-  └──────┬──────┘
-         │ List[RagChunk]
-         ▼
-  ┌─────────────┐
-  │ Embed        │  FastEmbed async (asyncio.to_thread)
-  │              │  Model: paraphrase-multilingual-MiniLM-L12-v2
-  │              │  Dim: 384
-  │              │  Batch: 32 texts at a time
-  └──────┬──────┘
-         │ List[float] per chunk
-         ▼
-  ┌─────────────┐
-  │ Store        │  INSERT INTO knowledge_chunks
-  │              │  • text, chunk_index, token_count
-  │              │  • embedding VECTOR(384)
-  │              │  • extra_metadata JSONB (provenance)
-  └─────────────┘
+**Read path — Knowledge retrieval at query time:**
 
+```mermaid
+flowchart TD
+    UM[User Message<br/>latest in chat] --> BQ
 
-KNOWLEDGE RETRIEVAL (read path)
-════════════════════════════════
+    BQ[Build Query<br/>Combine: user message +<br/>channel context + description] --> EQ
 
-  User Message (latest message in chat)
-       │
-       ▼
-  ┌─────────────┐
-  │ Build Query  │  Combine: user message + channel context + channel description
-  └──────┬──────┘
-         │
-         ▼
-  ┌─────────────┐
-  │ Embed Query  │  Same FastEmbed model (384-dim)
-  └──────┬──────┘
-         │
-         ▼
-  ┌─────────────┐
-  │ Vector Search│  SELECT ... FROM knowledge_chunks
-  │              │  JOIN knowledge (active rows only)
-  │              │  ORDER BY embedding <=> query_vector
-  │              │  LIMIT RAG_TOP_K * 2 (oversample)
-  └──────┬──────┘
-         │
-         ▼
-  ┌─────────────┐
-  │ Deduplicate  │  One chunk per knowledge_id source
-  │ + Truncate   │  Cap to RAG_TOP_K (10) chunks
-  │              │  Cap to RAG_MAX_CONTEXT_CHARS (12,000)
-  └──────┬──────┘
-         │
-         ▼
-  ┌─────────────┐
-  │ Format       │  [S1] Title\nSource: ...\nText
-  │ Context      │  [S2] Title\nSource: ...\nText
-  └──────┬──────┘
-         │
-         ▼
-  ┌─────────────┐
-  │ Inject into  │  Appended to system prompt before user messages
-  │ System Prompt│  "Use context as primary source. Cite [S1]."
-  └─────────────┘
+    EQ[Embed Query<br/>Same FastEmbed model, 384-dim] --> VS
+
+    VS[Vector Search<br/>SELECT FROM knowledge_chunks<br/>JOIN knowledge — active rows only<br/>ORDER BY embedding <=> query_vector<br/>LIMIT RAG_TOP_K × 2 — oversample] --> DT
+
+    DT[Deduplicate + Truncate<br/>One chunk per knowledge_id<br/>Cap to RAG_TOP_K — 10 chunks<br/>Cap to RAG_MAX_CONTEXT_CHARS — 12k] --> FC
+
+    FC[Format Context<br/>[S1] Title + Source + Text<br/>[S2] Title + Source + Text] --> INJ
+
+    INJ[Inject into System Prompt<br/>Appended before user messages<br/>'Use context as primary source. Cite [S1].']
 ```
 
 ### 2.2 Chunking Details
@@ -294,21 +249,23 @@ The LLM is also instructed:
 
 ### 3.1 Entity Relationship
 
-```
-clients
-  ├── client_configs (1:1)
-  ├── sessions (1:N)
-  ├── knowledge (1:N)
-  │     └── knowledge_chunks (1:N)
-  ├── conversation_logs (1:N)
-  └── usage_logs (1:N)
-
-provider_credentials
-  └── channels (1:N)
-        └── sessions (1:N)
-              └── conversation_logs (1:N)
-
-personalities (reference/template table)
+```mermaid
+erDiagram
+    clients ||--o| client_configs : "1:1"
+    clients ||--o{ sessions : "1:N"
+    clients ||--o{ knowledge : "1:N"
+    clients ||--o{ conversation_logs : "1:N"
+    clients ||--o{ usage_logs : "1:N"
+    knowledge ||--o{ knowledge_chunks : "1:N"
+    provider_credentials ||--o{ channels : "1:N"
+    channels ||--o{ sessions : "1:N"
+    sessions ||--o{ conversation_logs : "1:N"
+    personalities {
+        uuid id PK
+        varchar name
+        varchar slug "unique"
+        text system_prompt
+    }
 ```
 
 ### 3.2 Table Reference
@@ -485,14 +442,17 @@ Kirana has four authentication methods. All use `Authorization: Bearer <token>`.
 
 ### 4.2 Auth Flow Diagram
 
-```
-Request with Authorization: Bearer <token>
-    │
-    ├── Is it a Channel embed_token?  ──▶ Embed auth (channel-scoped)
-    ├── Is it KIRANA_API_KEY?         ──▶ Server API key auth
-    ├── Is it a valid admin token?    ──▶ Admin auth (daily rotation)
-    ├── Is it a client API key?       ──▶ SHA256 lookup in clients table
-    └── None of the above             ──▶ 401 Unauthorized
+```mermaid
+flowchart TD
+    REQ[Request<br/>Authorization: Bearer token] --> E1{Is it a Channel<br/>embed_token?}
+    E1 -->|Yes| AUTH1[Embed Auth<br/>Channel-scoped access]
+    E1 -->|No| E2{Is it<br/>KIRANA_API_KEY?}
+    E2 -->|Yes| AUTH2[Server API Key Auth<br/>Full access]
+    E2 -->|No| E3{Is it a valid<br/>admin token?}
+    E3 -->|Yes| AUTH3[Admin Auth<br/>Daily rotation<br/>Full access]
+    E3 -->|No| E4{Is it a<br/>client API key?}
+    E4 -->|Yes| AUTH4[Client Auth<br/>SHA256 lookup<br/>in clients table]
+    E4 -->|No| ERR[401 Unauthorized]
 ```
 
 ### 4.3 Security Design Decisions
