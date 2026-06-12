@@ -1,1147 +1,924 @@
-# Kirana - AI Chat Service API
+# Kirana — AI Chat Platform with RAG
 
-Kirana is a **wrapper service** for AI chatbots built with **FastAPI** and **SvelteKit**. It provides a simple HTTP API that abstracts all AI complexity - clients don't need OpenAI SDK, tool configuration, or provider management. Just simple HTTP requests.
+**Production-ready AI chat API with built-in RAG (Retrieval-Augmented Generation), multi-provider routing, and embeddable widgets.** Built with FastAPI, SvelteKit, PostgreSQL/pgvector, and Redis.
 
-**Key Philosophy:** *Client simplicity. Server handles the complexity.*
+Deploy once. Use everywhere — REST API, WebSocket, embeddable chat widget, or as an OpenAI-compatible drop-in replacement.
 
-## Features
+---
 
-**🎯 Wrapper Philosophy: Simple clients, powerful server**
-
-- **Dead-Simple HTTP API** - No SDK needed. Just POST JSON, get response.
-- **Channel System** - Configure AI Provider + Personality once, use everywhere
-- **Session Management** - Persistent conversations without client state management
-- **Built-in Tools** - Knowledge search, datetime (configured server-side)
-- **Streaming Support** - Real-time SSE streaming for chat completions
-- **Custom Knowledge Base** - Upload docs, Kirana auto-searches when relevant
-- **Web Admin Panel** - Manage providers, channels, sessions via GUI
-- **Rate Limiting & Auth** - Built-in security layer
-- **Docker Ready** - One command to run everything
-
-## Architecture
-
-### Wrapper Pattern
+## What Kirana Does
 
 ```
-┌──────────┐     ┌──────────────┐     ┌────────────────┐
-│  Client  │────▶│   Kirana     │────▶│  AI Provider   │
-│ (Simple) │     │  (Wrapper)   │     │ (OpenAI, etc.) │
-└──────────┘     └──────────────┘     └────────────────┘
-                       │
-                       ▼
-                ┌──────────────┐
-                │   Tools      │
-                │  - Knowledge │
-                │  - Datetime  │
-                └──────────────┘
+                     ┌──────────────────────────────┐
+                     │         Kirana Server          │
+                     │                                │
+  Client ──────────▶ │  Auth → Channel → RAG → LLM   │ ────▶ AI Provider
+  (simple HTTP)      │                                │        (OpenAI, Z.AI,
+                     │  Tools: knowledge, datetime,   │         any compatible)
+                     │  web search, image analysis    │
+                     └──────────────────────────────┘
 ```
 
-**Client just sends:** `{ "messages": [...] }`
+**Kirana is the middle layer.** Clients send plain HTTP requests. Kirana handles authentication, channels, tool execution, knowledge retrieval (RAG), and LLM communication. Clients don't need OpenAI SDKs, don't manage prompts, don't configure tools.
 
-**Kirana handles:** Auth, tools, knowledge, streaming, session history, rate limiting
+**Key difference from calling an LLM directly:** Kirana deterministically injects relevant knowledge base chunks into the LLM context before every request — the LLM always has the right information without the client having to manage retrieval.
 
-### Provider + Channel System
+---
 
-Kirana uses a flexible two-layer configuration:
+## Core Features
 
-```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│  Provider   │────▶│   Channel   │────▶│   Session   │
-│  (AI API)   │     │(Personality)│     │  (Chat)     │
-└─────────────┘     └─────────────┘     └─────────────┘
-```
+| Feature | What it does |
+|---------|-------------|
+| **RAG Pipeline** | Documents → LiteParse → Chunk (tiktoken 800/120) → Embed (FastEmbed 384d) → pgvector HNSW → Deterministic context injection |
+| **Multi-Provider** | Configure OpenAI, Z.AI, or any OpenAI-compatible API. Switch per channel. Active/inactive per provider. |
+| **Channel System** | Each channel = provider + personality + tools + context guard. One server, unlimited use cases. |
+| **Tool Calling** | query_knowledge (vector search), get_current_datetime, web search via MCP, image analysis via Vision |
+| **Session Management** | Persistent chat history. Auto-cleanup. Multi-session per client. |
+| **Embed Widget** | Drop-in chat iframe for any website. Customizable theme. Visitor isolation via localStorage + server sessions. |
+| **Streaming** | SSE streaming (standard `stream: true`). Buffer-based resume for reconnection. |
+| **Admin Panel** | SvelteKit dashboard at `/panel`. Manage providers, channels, knowledge, sessions. |
+| **Auth** | API key, admin token, client API key (hashed), embed token. Per-endpoint granularity. |
 
-- **Provider** - LLM API configuration (OpenAI, Z.AI, etc.) - Admin sets up once
-- **Channel** - Personality, tools, system prompt - Admin configures
-- **Session** - Individual chat conversations - Client just uses
+---
 
 ## Quick Start
 
 ### Prerequisites
 
-- Docker & Docker Compose
-- OpenAI-compatible API key (OpenAI, Z.AI, etc.)
+- Docker & Docker Compose (for infrastructure)
+- Python 3.11+ (for local backend dev)
+- Node.js 22+ (for local frontend dev)
+- An OpenAI-compatible API key
 
-### Option 1: Using Pre-built Image (Recommended)
-
-Pull the latest image from GitHub Container Registry:
+### Option 1: Full Docker (Recommended for Production)
 
 ```bash
+# Pull the image
 docker pull ghcr.io/utsmannn/kirana:latest
-```
 
-Create a `docker-compose.yml`:
-
-```yaml
+# Create docker-compose.yml
+cat > docker-compose.yml << 'EOF'
 services:
   kirana:
     image: ghcr.io/utsmannn/kirana:latest
     ports:
       - "8000:8000"
     environment:
-      - OPENAI_API_KEY=your-api-key
       - KIRANA_API_KEY=your-secure-api-key
       - ADMIN_PASSWORD=your-admin-password
+      - SECRET_KEY=$(openssl rand -hex 32)
       - DB_HOST=postgres
       - DB_USER=kirana
       - DB_PASS=kirana
       - DB_NAME=kirana
       - REDIS_HOST=redis
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
       - kirana-uploads:/app/uploads
+    restart: unless-stopped
 
   postgres:
-    image: postgres:15-alpine
+    image: pgvector/pgvector:pg16
     environment:
       - POSTGRES_USER=kirana
       - POSTGRES_PASSWORD=kirana
       - POSTGRES_DB=kirana
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kirana -d kirana"]
+      interval: 5s
+      retries: 5
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
+    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
     volumes:
       - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
+    restart: unless-stopped
 
 volumes:
   kirana-uploads:
   postgres-data:
   redis-data:
-```
+EOF
 
-Start services:
-```bash
 docker compose up -d
 ```
 
-### Option 2: Build from Source
-
-**1. Clone and Configure**
-
-```bash
-git clone <repository-url>
-cd kirana
-
-# Copy environment file
-cp .env.example .env
-
-# Edit .env with your API keys
-vim .env
-```
-
-**2. Start Services**
-
-```bash
-docker compose up -d
-```
-
-Verify services are healthy:
+Verify:
 ```bash
 curl http://localhost:8000/health
-# {"app": "kirana", "status": "ok", "database": "ok", "redis": "ok"}
+# {"app":"kirana","status":"ok","database":"ok","redis":"ok"}
 ```
 
-Services will be available at:
-- **API**: http://localhost:8000
-- **Admin Panel**: http://localhost:8000/panel
-- **PostgreSQL**: localhost:5432
-- **Redis**: localhost:6379
+### Option 2: Local Development (Recommended for Customization)
+
+Infrastructure runs in Docker. Backend + frontend run locally for hot-reload.
+
+```bash
+# 1. Start infrastructure (PostgreSQL + Redis)
+make infra
+
+# 2. Install dependencies
+make install-python
+make install-web
+
+# 3. Run migrations
+make migrate
+
+# 4. Start backend + frontend (both print logs to console)
+make dev
+```
+
+**What `make dev` does:** Starts `uvicorn` on port 8000 and `vite dev` on port 5173 concurrently. Both log to the same terminal. Ctrl+C stops both.
+
+See the **[Makefile](Makefile)** for all targets.
 
 ### Quick Test
 
-**API Call:**
-
 ```bash
+# Login to admin panel
+curl -X POST http://localhost:8000/v1/admin/login \
+  -H "Content-Type: application/json" \
+  -d '{"password":"admin"}'
+# → {"token": "abc123..."}
+
+# Chat
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Authorization: Bearer kirana-default-api-key-change-me" \
   -H "Content-Type: application/json" \
-  -d '{"model": "default", "messages": [{"role": "user", "content": "Hello!"}]}'
+  -d '{
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "stream": false
+  }'
 ```
 
-**Admin Panel:**
+Open **http://localhost:8000/panel** for the admin dashboard.
 
-Open http://localhost:8000/panel and login with:
-- **Password**: `admin` (or your `ADMIN_PASSWORD` from .env)
+---
 
-### Available Docker Tags
+## Architecture Deep Dive
 
-| Tag | Description |
-|-----|-------------|
-| `ghcr.io/utsmannn/kirana:latest` | Latest stable release |
-| `ghcr.io/utsmannn/kirana:main` | Latest development build |
-| `ghcr.io/utsmannn/kirana:v1.0.0` | Specific version |
-| `ghcr.io/utsmannn/kirana:1.0` | Major.minor version |
+### RAG Pipeline
 
-### Creating a Release
+This is the core knowledge system. Every uploaded document goes through this pipeline:
 
-To create a new release with automatic Docker image and GitHub Release:
+```
+Document (PDF/DOCX/XLSX/TXT/CSV)
+    │
+    ▼
+┌──────────────┐
+│  LiteParse   │  OCR-enabled smart parsing (Indonesian OCR).
+│  Parser      │  Falls back to generic extraction.
+└──────┬───────┘
+       │ ParsedDocument (text + page/bbox/font metadata)
+       ▼
+┌──────────────┐
+│  Chunking    │  tiktoken cl100k_base. 800-token chunks.
+│              │  120-token overlap. Paragraph-aware splitting.
+└──────┬───────┘
+       │ List[RagChunk] (text + provenance metadata)
+       ▼
+┌──────────────┐
+│  Embedding   │  FastEmbed: paraphrase-multilingual-MiniLM-L12-v2
+│              │  Dimension: 384. Batched (32 at a time).
+└──────┬───────┘
+       │ KnowledgeChunk rows with pgvector embeddings
+       ▼
+┌──────────────┐
+│  pgvector    │  HNSW index. Cosine distance.
+│  Storage     │  Stores embeddings + metadata.
+└──────┬───────┘
+       │
+       ▼
+┌──────────────┐
+│  Retrieval   │  On chat: embed user query → cosine search
+│  (at query   │  → deduplicate → top-10 chunks → format as
+│   time)      │  [S1], [S2] citations → inject into LLM context
+└──────────────┘
+```
+
+**Key design decisions:**
+- **Deterministic, not tool-based.** RAG context is injected before every chat request — the LLM doesn't decide whether to search. This ensures it always has relevant knowledge.
+- **pgvector, not Qdrant.** Kirana already ships pgvector Postgres. No extra service needed.
+- **Chunks preserve provenance.** Each chunk knows its source document, page number, bbox coordinates, and extraction method. Citations are traceable.
+
+### Chat Flow
+
+```
+POST /v1/chat/completions
+    │
+    ▼
+1. Authenticate (API key / admin token / embed token / client API key)
+    │
+    ▼
+2. Resolve Channel → get provider credentials, personality, context guard
+    │
+    ▼
+3. Build system prompt (personality + context guard + tool definitions)
+    │
+    ▼
+4. Retrieve RAG context (embed user query → pgvector search → format citations)
+    │
+    ▼
+5. Inject RAG context into system prompt (deterministic, not tool-based)
+    │
+    ▼
+6. Call LLM via OpenAI SDK (using channel's provider — not .env fallback)
+    │
+    ▼
+7. Stream or return response
+```
+
+### Provider + Channel Model
+
+```
+┌──────────────────┐
+│ ProviderCredential│  ← API key, base URL, model name
+│ (one per AI API)  │
+└────────┬─────────┘
+         │ 1:N
+         ▼
+┌──────────────────┐
+│     Channel       │  ← Personality, system prompt, tools, context guard
+│ (one per use-case)│
+└────────┬─────────┘
+         │ 1:N
+         ▼
+┌──────────────────┐
+│     Session       │  ← Individual chat conversations
+└──────────────────┘
+```
+
+**Why this way:** One provider can power many channels (e.g., "Support Bot", "Sales Assistant", "Code Reviewer"), each with different personalities, tools, and knowledge scope. Clients just specify a `channel_id`.
+
+---
+
+## Authentication
+
+Kirana has **4 auth methods**, all using `Authorization: Bearer <token>`:
+
+| Method | Token | Used by | Scope |
+|--------|-------|---------|-------|
+| **Server API Key** | `KIRANA_API_KEY` from `.env` | Admin scripts, internal services | All endpoints |
+| **Admin Token** | From `POST /v1/admin/login` | Admin panel users | All endpoints (rotates daily) |
+| **Client API Key** | From `POST /v1/clients` (registration) | External API consumers | `/v1/clients/me`, chat, knowledge |
+| **Embed Token** | From channel config (`?embed_token=...`) | Embed widget visitors | Chat only (per-channel) |
+
+**Client API keys are SHA256-hashed** in the database. The raw key is shown only once at registration time.
 
 ```bash
-# Create and push a version tag
-git tag v1.0.0
-git push origin v1.0.0
+# Register as an external client
+curl -X POST http://localhost:8000/v1/clients/ \
+  -H "Content-Type: application/json" \
+  -d '{"name":"My App","email":"dev@example.com"}'
+# Response includes api_key — save it, it won't be shown again
+
+# Use the client API key
+curl http://localhost:8000/v1/clients/me \
+  -H "Authorization: Bearer kir_xxxxxxxxxxxx"
 ```
 
-This will:
-1. Build Docker image for `linux/amd64` and `linux/arm64`
-2. Push to `ghcr.io/utsmannn/kirana:v1.0.0`, `ghcr.io/utsmannn/kirana:1.0`, `ghcr.io/utsmannn/kirana:1`
-3. Create GitHub Release with changelog from `CHANGELOG.md`
+---
+
+## API Reference
+
+### Base URL: `http://localhost:8000/v1`
+
+### Chat
+
+**`POST /v1/chat/completions`** — OpenAI-compatible chat endpoint.
+
+```bash
+# Non-streaming
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [{"role": "user", "content": "What is Kirana?"}],
+    "channel_id": "<uuid>",
+    "session_id": "<uuid>",
+    "stream": false
+  }'
+
+# Streaming (SSE)
+curl -N -X POST http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [{"role": "user", "content": "Tell me a story"}],
+    "channel_id": "<uuid>",
+    "stream": true
+  }'
+```
+
+**Request body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `messages` | array | Yes | OpenAI-format message array `[{"role":"user","content":"..."}]` |
+| `channel_id` | UUID | No | Which channel to use (falls back to default) |
+| `session_id` | UUID | No | For persistent conversations (Kirana manages history) |
+| `stream` | bool | No | Enable SSE streaming (default: false) |
+| `visitor_id` | string | No | For embed widget visitor tracking |
+
+**`WS /v1/chat/ws`** — WebSocket for real-time streaming chat.
+
+```
+ws://localhost:8000/v1/chat/ws?channel_id=<uuid>&token=<api_key>
+```
+
+### Sessions
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/v1/sessions` | Create session |
+| `GET` | `/v1/sessions` | List sessions |
+| `GET` | `/v1/sessions/{id}` | Get session details |
+| `PATCH` | `/v1/sessions/{id}` | Update session |
+| `DELETE` | `/v1/sessions/{id}` | Delete session |
+| `GET` | `/v1/sessions/{id}/messages` | Get conversation history |
+
+### Knowledge Base (RAG)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/v1/knowledge` | Create text knowledge item |
+| `GET` | `/v1/knowledge` | List/search knowledge items |
+| `GET` | `/v1/knowledge/{id}` | Get single item |
+| `PATCH` | `/v1/knowledge/{id}` | Update item (re-indexes chunks) |
+| `DELETE` | `/v1/knowledge/{id}` | Delete item + chunks |
+| `POST` | `/v1/knowledge/upload` | Upload file → auto-parse → auto-chunk |
+| `POST` | `/v1/knowledge/scrape-web` | Scrape single URL → knowledge |
+| `POST` | `/v1/knowledge/crawl-web` | Crawl entire site → knowledge |
+| `GET` | `/v1/knowledge/{id}/download` | Download original file |
+
+**Upload supported formats:**
+
+| Format | Extensions | Parser | Notes |
+|--------|-----------|--------|-------|
+| PDF | `.pdf` | LiteParse (OCR) | Falls back to text extraction + Vision API |
+| Word | `.docx` | LiteParse | `.doc` not supported (convert to `.docx`) |
+| Excel | `.xlsx` | Vision API | Sheet-by-sheet image analysis |
+| PowerPoint | `.pptx` | Text extraction | AI summary appended |
+| Text/CSV/Markdown | `.txt`, `.csv`, `.md`, `.json` | Direct | No parsing needed |
+| Images | `.png`, `.jpg`, `.jpeg` | Vision API | OCR + description |
+
+```bash
+# Upload a document
+curl -X POST http://localhost:8000/v1/knowledge/upload \
+  -H "Authorization: Bearer <token>" \
+  -F "file=@document.pdf" \
+  -F "title=Company Handbook"
+
+# The file is automatically:
+# 1. Parsed (LiteParse for PDF/DOCX, direct for text)
+# 2. Chunked into 800-token segments
+# 3. Embedded with FastEmbed (384-dim)
+# 4. Stored in pgvector with HNSW index
+# After this, chat requests will automatically retrieve relevant chunks.
+```
+
+### Channels
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/v1/channels` | List channels |
+| `POST` | `/v1/channels` | Create channel |
+| `GET` | `/v1/channels/{id}` | Get channel |
+| `PATCH` | `/v1/channels/{id}` | Update channel |
+| `DELETE` | `/v1/channels/{id}` | Delete channel |
+| `POST` | `/v1/channels/{id}/set-default` | Set as default channel |
+| `POST` | `/v1/channels/{id}/embed` | Enable embed widget |
+| `GET` | `/v1/channels/{id}/embed` | Get embed config (auth required) |
+| `GET` | `/v1/channels/{id}/embed/public` | Get public embed config (no auth) |
+| `DELETE` | `/v1/channels/{id}/embed` | Disable embed |
+
+### Providers
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/v1/providers` | List providers |
+| `POST` | `/v1/providers` | Create provider |
+| `GET` | `/v1/providers/{id}` | Get provider |
+| `PATCH` | `/v1/providers/{id}` | Update provider |
+| `DELETE` | `/v1/providers/{id}` | Delete provider |
+| `POST` | `/v1/providers/{id}/activate` | Activate provider |
+| `POST` | `/v1/providers/{id}/reorder` | Reorder priority |
+
+### Admin
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/v1/admin/login` | Login → admin token |
+| `GET` | `/v1/admin/verify` | Verify token valid |
+| `GET` | `/v1/admin/config` | Get admin config |
+
+### Clients (External API Consumers)
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `POST` | `/v1/clients` | None | Register → get API key |
+| `GET` | `/v1/clients/me` | Client key | Get client profile |
+| `POST` | `/v1/clients/me/regenerate-key` | Client key | Rotate API key |
+
+### Other
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/v1/config` | Get client config |
+| `PATCH` | `/v1/config` | Update client config |
+| `GET` | `/v1/personalities` | List personality templates |
+| `GET` | `/v1/tools` | List available tools |
+| `POST` | `/v1/tools/execute` | Execute a tool directly |
+| `GET` | `/v1/usage` | Usage statistics |
+
+---
 
 ## Configuration
 
 ### Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `KIRANA_API_KEY` | API key for client authentication | `kirana-default-api-key-change-me` |
-| `ADMIN_PASSWORD` | Admin panel login password | `admin` |
-| `SECRET_KEY` | Secret for admin token generation | (random) |
-| `APP_PORT` | Application port | `8000` |
-| **LLM Provider** |||
-| `OPENAI_API_KEY` | Your LLM API key (OpenAI, Z.AI, etc.) | - |
-| `OPENAI_BASE_URL` | Custom provider base URL | `https://api.openai.com/v1` |
-| `DEFAULT_MODEL` | Default model identifier | `gpt-4o-mini` |
-| `LLM_TIMEOUT` | LLM request timeout (seconds) | `120` |
-| `LLM_MAX_RETRIES` | Max retry attempts | `3` |
-| **Database** |||
-| `DB_HOST` | PostgreSQL host | `localhost` |
-| `DB_PORT` | PostgreSQL port | `5432` |
-| `DB_USER` | PostgreSQL username | `kirana` |
-| `DB_PASS` | PostgreSQL password | `kirana` |
-| `DB_NAME` | PostgreSQL database name | `kirana` |
-| **Redis** |||
-| `REDIS_HOST` | Redis host | `localhost` |
-| `REDIS_PORT` | Redis port | `6379` |
-| **Rate Limiting** |||
-| `RATE_LIMIT_ENABLED` | Enable request rate limiting | `true` |
-| `RATE_LIMIT_REQUESTS_PER_MINUTE` | Max requests per minute per client | `60` |
-| **Features** |||
-| `SESSION_EXPIRY_DAYS` | Auto-archive sessions after N days | `3` |
-| `CORS_ORIGINS` | Allowed CORS origins (comma-separated) | `*` |
-| **Optional Services** |||
-| `ZAI_API_KEY` | Z.AI API key for Vision and MCP | - |
+All variables with their defaults. Required ones are marked.
+
+#### Application
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `APP_NAME` | `kirana` | Application name |
+| `APP_ENV` | `development` | Environment (`development`, `production`) |
+| `DEBUG` | `false` | Debug mode |
+| `SECRET_KEY` | (random) | Secret for token generation — **change in production** |
+
+#### Authentication
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `KIRANA_API_KEY` | `kirana-default-api-key-change-me` | Server API key — **change in production** |
+| `ADMIN_PASSWORD` | `admin` | Admin panel password — **change in production** |
+
+#### LLM Provider
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OPENAI_API_KEY` | — | Default LLM API key (used if no provider configured) |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Default LLM base URL |
+| `DEFAULT_MODEL` | `gpt-4o-mini` | Default model name |
+| `LLM_TIMEOUT` | `60` | Request timeout (seconds) |
+| `LLM_MAX_RETRIES` | `3` | Max retry attempts |
+
+#### Database
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DB_HOST` | `localhost` | PostgreSQL host |
+| `DB_PORT` | `5432` | PostgreSQL port |
+| `DB_USER` | `kirana` | PostgreSQL user |
+| `DB_PASS` | `kirana` | PostgreSQL password |
+| `DB_NAME` | `kirana` | PostgreSQL database |
+| `DB_POOL_SIZE` | `20` | Connection pool size |
+| `DB_MAX_OVERFLOW` | `10` | Max overflow connections |
+| `DB_POOL_RECYCLE` | `3600` | Connection recycle (seconds) |
+
+#### Redis
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REDIS_HOST` | `localhost` | Redis host |
+| `REDIS_PORT` | `6379` | Redis port |
+
+#### RAG Pipeline
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RAG_ENABLED` | `true` | Enable RAG context injection |
+| `RAG_EMBED_MODEL` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | FastEmbed model |
+| `RAG_EMBED_DIM` | `384` | Embedding dimension |
+| `RAG_CHUNK_MAX_TOKENS` | `800` | Max tokens per chunk |
+| `RAG_CHUNK_OVERLAP_TOKENS` | `120` | Token overlap between chunks |
+| `RAG_TOP_K` | `10` | Max chunks retrieved per query |
+| `RAG_MAX_CONTEXT_CHARS` | `12000` | Max context characters injected |
+| `RAG_EMBED_BATCH_SIZE` | `32` | Batch size for embedding |
+
+#### LiteParse (Document Parsing)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LITEPARSE_ENABLED` | `true` | Enable LiteParse for document parsing |
+| `LITEPARSE_OCR_LANGUAGE` | `ind` | OCR language code |
+| `LITEPARSE_MAX_PAGES` | `1000` | Max pages to parse |
+| `LITEPARSE_DPI` | `150` | DPI for OCR rendering |
+
+#### Vision API (Image/Excel Analysis)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ZAI_API_KEY` | — | Z.AI API key for Vision (GLM-4V) |
+| `ZAI_VISION_BASE_URL` | `https://api.z.ai/api/coding/paas/v4` | Vision API base URL |
+| `ZAI_VISION_MODEL` | `glm-4.6v` | Vision model name |
+
+#### Rate Limiting
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RATE_LIMIT_ENABLED` | `true` | Enable rate limiting |
+| `RATE_LIMIT_REQUESTS_PER_MINUTE` | `60` | Max requests/minute per client |
+
+#### Session Management
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SESSION_EXPIRY_DAYS` | `3` | Days before session considered inactive |
+| `SESSION_DELETION_DAYS` | `7` | Days before session is deleted |
+| `SESSION_CLEANUP_INTERVAL_HOURS` | `1` | Cleanup interval |
+
+#### CORS & Uploads
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CORS_ORIGINS` | `*` | Allowed origins (comma-separated) |
+| `UPLOAD_DIR` | `/app/uploads` | Upload directory path |
+
+---
 
-## API Reference
+## Embed Widget
 
-### Authentication
-
-All API endpoints require authentication via Bearer token:
-
-```bash
-Authorization: Bearer <API_KEY>
-```
-
-The default API key is set in your `.env` or can be configured per-client.
-
-### Chat Completions
-
-#### Non-Streaming Chat
-
-```bash
-curl -X POST http://localhost:8000/v1/chat/completions \
-  -H "Authorization: Bearer kirana-default-api-key-change-me" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "default",
-    "messages": [
-      {"role": "user", "content": "Hello, how are you?"}
-    ],
-    "stream": false
-  }'
-```
-
-**Response:**
-```json
-{
-  "id": "chat-xxx",
-  "object": "chat.completion",
-  "created": 1234567890,
-  "model": "glm-4.7",
-  "choices": [{
-    "index": 0,
-    "message": {
-      "role": "assistant",
-      "content": "Hello! I'm doing well, thank you for asking..."
-    },
-    "finish_reason": "stop"
-  }],
-  "usage": {
-    "prompt_tokens": 10,
-    "completion_tokens": 20,
-    "total_tokens": 30
-  }
-}
-```
-
-#### Streaming Chat
-
-```bash
-curl -N -X POST http://localhost:8000/v1/chat/completions \
-  -H "Authorization: Bearer kirana-default-api-key-change-me" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "default",
-    "messages": [
-      {"role": "user", "content": "Tell me a joke"}
-    ],
-    "stream": true
-  }'
-```
-
-**Stream Response:**
-```
-data: {"id":"...","choices":[{"delta":{"content":"Why"}}]}
-data: {"id":"...","choices":[{"delta":{"content":" did"}}]}
-data: {"id":"...","choices":[{"delta":{"content":" the"}}]}
-...
-data: [DONE]
-```
-
-### Session Management
-
-#### Create Session
-
-```bash
-curl -X POST http://localhost:8000/v1/sessions/ \
-  -H "Authorization: Bearer kirana-default-api-key-change-me" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "My Chat Session",
-    "channel_id": "<channel-uuid>",
-    "metadata": {"topic": "support"}
-  }'
-```
-
-**Response:**
-```json
-{
-  "id": "session-uuid",
-  "name": "My Chat Session",
-  "channel_id": "channel-uuid",
-  "message_count": 0,
-  "created_at": "2024-01-15T10:30:00Z"
-}
-```
-
-#### List Sessions
-
-```bash
-curl http://localhost:8000/v1/sessions/ \
-  -H "Authorization: Bearer kirana-default-api-key-change-me"
-```
-
-#### Chat with Session (Persistent)
-
-```bash
-curl -X POST http://localhost:8000/v1/chat/completions \
-  -H "Authorization: Bearer kirana-default-api-key-change-me" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "default",
-    "session_id": "<session-uuid>",
-    "messages": [
-      {"role": "user", "content": "Remember this number: 42"}
-    ]
-  }'
-```
-
-#### Get Session Messages
-
-```bash
-curl http://localhost:8000/v1/sessions/<session-uuid>/messages \
-  -H "Authorization: Bearer kirana-default-api-key-change-me"
-```
-
-**Response:**
-```json
-{
-  "session_id": "session-uuid",
-  "messages": [
-    {"id": "msg-1", "role": "user", "content": "Hello", "created_at": "..."},
-    {"id": "msg-2", "role": "assistant", "content": "Hi there!", "created_at": "..."}
-  ],
-  "total": 2,
-  "page": 1,
-  "limit": 50
-}
-```
-
-### Channel Management
-
-#### List Channels
-
-```bash
-curl http://localhost:8000/v1/channels/ \
-  -H "Authorization: Bearer kirana-default-api-key-change-me"
-```
-
-#### Create Channel
-
-```bash
-curl -X POST http://localhost:8000/v1/channels/ \
-  -H "Authorization: Bearer kirana-default-api-key-change-me" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Support Bot",
-    "provider_id": "<provider-uuid>",
-    "system_prompt": "You are a helpful customer support agent.",
-    "temperature": 0.7,
-    "max_tokens": 2000
-  }'
-```
-
-### Provider Management
-
-#### List Providers
-
-```bash
-curl http://localhost:8000/v1/providers/ \
-  -H "Authorization: Bearer kirana-default-api-key-change-me"
-```
-
-#### Create Provider
-
-```bash
-curl -X POST http://localhost:8000/v1/providers/ \
-  -H "Authorization: Bearer kirana-default-api-key-change-me" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Z.AI API",
-    "api_key": "your-api-key",
-    "base_url": "https://api.z.ai/api/coding/paas/v4",
-    "default_model": "glm-4.7",
-    "is_active": true
-  }'
-```
-
-### Knowledge Base
-
-Kirana provides a built-in knowledge base that can be used to store documents, FAQs, and other information. The AI automatically searches this knowledge base when relevant to user queries.
-
-#### List Knowledge Items
-
-```bash
-curl "http://localhost:8000/v1/knowledge/?page=1&limit=20&search=faq" \
-  -H "Authorization: Bearer kirana-default-api-key-change-me"
-```
-
-**Query Parameters:**
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `page` | int | 1 | Page number |
-| `limit` | int | 20 | Items per page |
-| `search` | string | - | Search in title/content |
-
-**Response:**
-```json
-{
-  "items": [
-    {
-      "id": "uuid",
-      "title": "Product FAQ",
-      "content": "Our product supports...",
-      "content_type": "text",
-      "has_file": false,
-      "created_at": "2024-01-15T10:30:00Z",
-      "updated_at": "2024-01-15T10:30:00Z"
-    }
-  ],
-  "total": 1,
-  "page": 1,
-  "limit": 20,
-  "pages": 1
-}
-```
-
-#### Get Single Knowledge Item
-
-```bash
-curl http://localhost:8000/v1/knowledge/<knowledge-id> \
-  -H "Authorization: Bearer kirana-default-api-key-change-me"
-```
-
-**Response:**
-```json
-{
-  "id": "uuid",
-  "title": "Product FAQ",
-  "content": "Our product supports...",
-  "content_type": "text",
-  "has_file": false,
-  "file_name": null,
-  "file_size": null,
-  "mime_type": null,
-  "created_at": "2024-01-15T10:30:00Z",
-  "updated_at": "2024-01-15T10:30:00Z"
-}
-```
-
-#### Create Knowledge (Text)
-
-```bash
-curl -X POST http://localhost:8000/v1/knowledge/ \
-  -H "Authorization: Bearer kirana-default-api-key-change-me" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "Product FAQ",
-    "content": "Our product supports the following features...",
-    "content_type": "text"
-  }'
-```
-
-**Request Body:**
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `title` | string | Yes | Title of the knowledge item |
-| `content` | string | Yes | Text content |
-| `content_type` | string | Yes | Type: `text`, `markdown`, `html`, `json` |
-
-#### Update Knowledge
-
-```bash
-curl -X PATCH http://localhost:8000/v1/knowledge/<knowledge-id> \
-  -H "Authorization: Bearer kirana-default-api-key-change-me" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "Updated Title",
-    "content": "Updated content..."
-  }'
-```
-
-#### Delete Knowledge
-
-```bash
-curl -X DELETE http://localhost:8000/v1/knowledge/<knowledge-id> \
-  -H "Authorization: Bearer kirana-default-api-key-change-me"
-```
-
-#### Upload File (AI-Powered Analysis)
-
-Upload documents for automatic AI analysis and content extraction. Supported formats:
-
-| Format | Extension | Processing Method |
-|--------|-----------|-------------------|
-| PDF | `.pdf` | Native text extraction + Vision API fallback for scanned PDFs |
-| Word | `.docx` | Text extraction + AI summary |
-| Excel | `.xlsx`, `.xls` | Converted to images + Vision API analysis |
-| PowerPoint | `.pptx` | Text extraction + AI summary |
-| Images | `.png`, `.jpg`, `.jpeg` | Vision API analysis |
-
-```bash
-curl -X POST http://localhost:8000/v1/knowledge/upload \
-  -H "Authorization: Bearer kirana-default-api-key-change-me" \
-  -F "file=@document.pdf" \
-  -F "title=Annual Report 2024"
-```
-
-**Form Data:**
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `file` | file | Yes | Document file (PDF, Word, Excel, PPT, or image) |
-| `title` | string | No | Custom title (defaults to filename) |
-
-**Response:**
-```json
-{
-  "id": "uuid",
-  "title": "Annual Report 2024",
-  "content": "# Document Summary\n\n[AI-generated summary of the document content...]\n\n---\n\n## Raw Content\n\n[Original extracted text from the document...]",
-  "content_type": "pdf",
-  "has_file": true,
-  "file_name": "document.pdf",
-  "file_size": 245760,
-  "mime_type": "application/pdf",
-  "created_at": "2024-01-15T10:30:00Z",
-  "updated_at": "2024-01-15T10:30:00Z"
-}
-```
-
-**Processing Pipeline:**
-
-1. **PDF Files:**
-   - Native text extraction using OCR
-   - If successful → AI analysis → Save summary + raw text
-   - If scanned/empty → Convert to images → Vision API → Save analysis
-
-2. **Excel Files:**
-   - Each sheet converted to image
-   - Vision API analyzes all images
-   - Detailed data extraction (values, formulas, charts)
-
-3. **Word/PowerPoint:**
-   - Text extraction
-   - AI summary generation
-   - Combined summary + raw text saved
-
-4. **Images:**
-   - Direct Vision API analysis
-   - Detailed description saved
-
-#### Download Original File
-
-Download the original uploaded file:
-
-```bash
-curl http://localhost:8000/v1/knowledge/<knowledge-id>/download \
-  -H "Authorization: Bearer kirana-default-api-key-change-me" \
-  -o downloaded_file.pdf
-```
-
-**Response:** Binary file with appropriate `Content-Type` and `Content-Disposition` headers.
-
-#### Knowledge Response Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | string | Unique identifier (UUID) |
-| `title` | string | Title of the knowledge item |
-| `content` | string | AI-generated summary + raw text content |
-| `content_type` | string | Type: `text`, `markdown`, `pdf`, `word`, `excel`, `ppt`, `image` |
-| `has_file` | boolean | Whether a file is attached |
-| `file_name` | string | Original filename (if uploaded) |
-| `file_size` | integer | File size in bytes (if uploaded) |
-| `mime_type` | string | Original MIME type (if uploaded) |
-| `created_at` | string | ISO 8601 timestamp |
-| `updated_at` | string | ISO 8601 timestamp |
-
-#### Environment Variables for File Processing
-
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `ZAI_API_KEY` | Z.AI API key for Vision API | Yes (for file uploads) |
-| `POPPLER_PATH` | Path to poppler binaries (Windows) | Optional |
-
-### Admin Endpoints
-
-#### Health Check
-
-```bash
-curl http://localhost:8000/health
-```
-
-#### Get Config
-
-```bash
-curl http://localhost:8000/v1/config/ \
-  -H "Authorization: Bearer kirana-default-api-key-change-me"
-```
-
-#### Get Usage Stats
-
-```bash
-curl http://localhost:8000/v1/usage/ \
-  -H "Authorization: Bearer kirana-default-api-key-change-me"
-```
-
-## Client Implementation Examples
-
-**Note:** Kirana abstracts all AI complexity. Clients just make simple HTTP requests - no OpenAI SDK needed, no tool configuration, no provider management. Kirana handles everything server-side.
-
-### Python (Standard Library)
-
-```python
-import urllib.request
-import json
-
-KIRANA_URL = "http://localhost:8000/v1/chat/completions"
-API_KEY = "kirana-default-api-key-change-me"
-
-# Simple non-streaming request
-def chat_simple(message):
-    req = urllib.request.Request(
-        KIRANA_URL,
-        headers={
-            "Authorization": f"Bearer {API_KEY}",
-            "Content-Type": "application/json"
-        },
-        data=json.dumps({
-            "model": "default",
-            "messages": [{"role": "user", "content": message}]
-        }).encode()
-    )
-    with urllib.request.urlopen(req) as resp:
-        data = json.loads(resp.read())
-        return data["choices"][0]["message"]["content"]
-
-print(chat_simple("Hello!"))
-
-# With session (persistent conversation history)
-def chat_with_session(session_id, message):
-    req = urllib.request.Request(
-        KIRANA_URL,
-        headers={
-            "Authorization": f"Bearer {API_KEY}",
-            "Content-Type": "application/json"
-        },
-        data=json.dumps({
-            "model": "default",
-            "session_id": session_id,  # Kirana manages history
-            "messages": [{"role": "user", "content": message}]
-        }).encode()
-    )
-    with urllib.request.urlopen(req) as resp:
-        return json.loads(resp.read())
-```
-
-### Node.js (Built-in fetch)
-
-```javascript
-const KIRANA_URL = 'http://localhost:8000/v1/chat/completions';
-const API_KEY = 'kirana-default-api-key-change-me';
-
-// Simple chat
-async function chatSimple(message) {
-  const response = await fetch(KIRANA_URL, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: 'default',
-      messages: [{ role: 'user', content: message }],
-    }),
-  });
-  const data = await response.json();
-  return data.choices[0].message.content;
-}
-
-// Streaming response
-async function* chatStream(message) {
-  const response = await fetch(KIRANA_URL, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: 'default',
-      messages: [{ role: 'user', content: message }],
-      stream: true,
-    }),
-  });
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-
-    for (const line of lines) {
-      if (line.startsWith('data: ')) {
-        const data = line.slice(6);
-        if (data === '[DONE]') return;
-        try {
-          const parsed = JSON.parse(data);
-          const content = parsed.choices?.[0]?.delta?.content;
-          if (content) yield content;
-        } catch {}
-      }
-    }
-  }
-}
-
-// Usage
-const response = await chatSimple('Hello!');
-console.log(response);
-
-// Or stream
-for await (const chunk of chatStream('Tell me a story')) {
-  process.stdout.write(chunk);
-}
-```
-
-### PHP
-
-```php
-<?php
-$KIRANA_URL = 'http://localhost:8000/v1/chat/completions';
-$API_KEY = 'kirana-default-api-key-change-me';
-
-function chatSimple($message) {
-    global $KIRANA_URL, $API_KEY;
-
-    $ch = curl_init($KIRANA_URL);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        "Authorization: Bearer $API_KEY",
-        "Content-Type: application/json"
-    ]);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode([
-        'model' => 'default',
-        'messages' => [['role' => 'user', 'content' => $message]]
-    ]));
-
-    $response = curl_exec($ch);
-    curl_close($ch);
-
-    $data = json_decode($response, true);
-    return $data['choices'][0]['message']['content'];
-}
-
-echo chatSimple('Hello!');
-?>
-```
-
-## Advanced Features
-
-### Embed Widget
-
-Kirana provides an embeddable chat widget that you can add to any website. The widget connects to your Kirana instance and provides real-time chat functionality.
-
-#### Basic Embed
-
-Add this to your HTML:
+Add a chat widget to any website with a single iframe:
 
 ```html
 <iframe
-  src="http://localhost:8000/embed?channel_id=YOUR_CHANNEL_ID"
+  src="http://your-server:8000/embed/CHANNEL_ID?embed_token=YOUR_TOKEN&primary_color=%234f46e5"
   width="400"
   height="600"
   style="border: none; border-radius: 12px;"
 ></iframe>
 ```
 
-#### Embed Authentication Options
+**URL parameters:**
 
-| Method | Parameter | Description |
-|--------|-----------|-------------|
-| **Public** | `?channel_id=<uuid>` | No auth required if channel has `public: true` |
-| **Token** | `?embed_token=<token>` | Use embed token from channel config |
-| **API Key** | `?token=<api_key>` | Full API access (admin use) |
+| Parameter | Description |
+|-----------|-------------|
+| `embed_token` | Auth token from channel config |
+| `primary_color` | Accent color (hex, URL-encoded: `%23` = `#`) |
+| `header_title` | Custom header text (URL-encoded) |
+| `theme` | `light` or `dark` |
 
-#### Embed URL Parameters
+**How visitor isolation works:**
+1. First visit → widget generates `visitor_id`, saves to localStorage
+2. Backend creates session named `Embed - {visitor_id}`
+3. Subsequent visits reuse the same session
+4. Each browser/device gets its own session — no cross-user mixing
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `channel_id` | UUID | Channel to use (required) |
-| `embed_token` | string | Embed token for private channels |
-| `token` | string | API key for full access |
-| `theme` | string | Theme: `dark` or `light` (default: channel config) |
-| `bg_color` | string | Background color (hex, overrides theme) |
-| `text_color` | string | Text color (hex, overrides theme) |
-| `primary_color` | string | Primary/accent color (hex) |
-| `bubble_style` | string | Bubble style: `rounded`, `square`, `minimal` |
-| `header_title` | string | Custom header title |
-| `css_url` | string | URL to custom CSS file |
+Enable embed in admin panel: **Channels → Edit → Embed → Enable**.
 
-#### Example with Customization
+---
 
-```html
-<iframe
-  src="http://localhost:8000/embed?channel_id=abc-123&theme=light&primary_color=%234f46e5&header_title=Support%20Chat&bubble_style=rounded"
-  width="400"
-  height="600"
-  style="border: none;"
-></iframe>
+## Client SDK Examples
+
+Kirana is plain HTTP. Any language works. No special SDK needed.
+
+### Python
+
+```python
+import requests
+
+KIRANA = "http://localhost:8000/v1"
+TOKEN = "kirana-default-api-key-change-me"
+
+def chat(message: str, channel_id: str = None, session_id: str = None) -> str:
+    resp = requests.post(
+        f"{KIRANA}/chat/completions",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+        json={
+            "messages": [{"role": "user", "content": message}],
+            "channel_id": channel_id,
+            "session_id": session_id,
+            "stream": False,
+        },
+    )
+    return resp.json()["choices"][0]["message"]["content"]
+
+# Usage
+print(chat("What is RAG?"))
+
+# With session persistence
+session = requests.post(
+    f"{KIRANA}/sessions/",
+    headers={"Authorization": f"Bearer {TOKEN}"},
+    json={"title": "My Chat"},
+).json()
+
+print(chat("My name is Bob", session_id=session["id"]))
+print(chat("What is my name?", session_id=session["id"]))
+# → "Your name is Bob."
 ```
 
-#### Configuring Embed in Admin Panel
+### JavaScript / TypeScript
 
-1. Go to **Channels** in admin panel
-2. Click **Edit** on a channel
-3. Scroll to **Embed Configuration**
-4. Enable embed and configure:
-   - **Save History**: Store chat history (localStorage + server session)
-   - **Public Access**: Allow access without embed token
+```typescript
+const KIRANA = "http://localhost:8000/v1";
+const TOKEN = "kirana-default-api-key-change-me";
 
-#### How Embed Sessions Work
+async function chat(message: string, sessionId?: string): Promise<string> {
+  const resp = await fetch(`${KIRANA}/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      messages: [{ role: "user", content: message }],
+      session_id: sessionId,
+      stream: false,
+    }),
+  });
+  const data = await resp.json();
+  return data.choices[0].message.content;
+}
 
-Each visitor gets a unique session for conversation continuity:
+// Streaming
+async function* chatStream(message: string) {
+  const resp = await fetch(`${KIRANA}/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      messages: [{ role: "user", content: message }],
+      stream: true,
+    }),
+  });
 
-1. **First visit**: Widget generates unique `visitor_id`, stores in localStorage
-2. **Backend creates session**: Session named `Embed - {visitor_id}` (e.g., `Embed - a7f3b2c1`)
-3. **Subsequent chats**: Widget sends `visitor_id` + `session_id` for continuity
-4. **Session appears in admin**: View all embed conversations in **Sessions** page
+  const reader = resp.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
 
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    for (const line of buffer.split("\n")) {
+      if (line.startsWith("data: ")) {
+        const text = line.slice(6);
+        if (text === "[DONE]") return;
+        try {
+          const chunk = JSON.parse(text);
+          yield chunk.choices?.[0]?.delta?.content || "";
+        } catch {}
+      }
+    }
+    buffer = buffer.includes("\n") ? buffer.split("\n").pop()! : "";
+  }
+}
 ```
-User A (Browser 1) → Session: "Embed - a7f3b2c1"
-User B (Browser 2) → Session: "Embed - x9y8z7w6"
-```
 
-Each visitor's conversation is isolated - no cross-user history sharing.
-
-#### WebSocket Support
-
-Embed uses WebSocket for real-time streaming. Connection URL:
-
-```
-ws://localhost:8000/v1/chat/ws?channel_id=<uuid>
-```
-
-For private channels:
-```
-ws://localhost:8000/v1/chat/ws?embed_token=<token>
-```
-
-### Tool Calling (Server-Side Configured)
-
-Tools are configured **server-side** in Kirana. Clients don't need to define tools - just use the channel that has the tools enabled.
-
-**Available tools in Kirana:**
-- `query_knowledge` - Search knowledge base automatically when relevant
-- `get_current_datetime` - Get current time in specified timezone
-
-**How it works:**
-1. Admin configures tools in a Channel via admin panel
-2. Client just sends normal requests to that channel's sessions
-3. Kirana automatically invokes tools when needed
+### cURL (one-liners)
 
 ```bash
-# Just send a normal message - Kirana handles tool calling
-# If the channel has knowledge_query enabled, Kirana will:
-# 1. Detect the query needs knowledge
-# 2. Call query_knowledge tool
-# 3. Include results in the response
-
+# Chat
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Authorization: Bearer kirana-default-api-key-change-me" \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "default",
-    "messages": [{"role": "user", "content": "What do you know about our product?"}]
-  }'
-# Kirana auto-calls query_knowledge if channel is configured
-```
+  -d '{"messages":[{"role":"user","content":"Hi"}],"stream":false}'
 
-### Context Guard
-
-Context Guard restricts AI responses to a specific domain/context. When enabled, the AI will only answer questions related to the configured context and politely decline off-topic queries.
-
-#### Configuration (via Admin Panel)
-
-1. Go to **Channels** → Edit Channel
-2. Under **Context Guard**:
-   - **Context Name**: The domain/entity (e.g., "Sekolah ABC", "Produk XYZ")
-   - **Context Description**: Additional details (optional)
-
-#### Example Behavior
-
-**Context:** "Sekolah ABC" with description "SMA di Jakarta"
-
-| User Question | AI Response |
-|---------------|-------------|
-| "Jam berapa sekolah buka?" | Answers with school info |
-| "Berapa biaya SPP?" | Answers from knowledge base |
-| "Bagaimana cuaca hari ini?" | Politely declines - off-topic |
-| "Ceritakan lelucon" | Politely declines - off-topic |
-
-**Without Context Guard:** AI answers any question freely.
-
-### Web Scraping & Crawling
-
-Kirana can scrape websites and add content to the knowledge base automatically.
-
-#### Scrape Single URL
-
-```bash
-curl -X POST http://localhost:8000/v1/knowledge/scrape-web \
+# Create knowledge
+curl -X POST http://localhost:8000/v1/knowledge/ \
   -H "Authorization: Bearer kirana-default-api-key-change-me" \
   -H "Content-Type: application/json" \
-  -d '{"url": "https://example.com/article"}'
-```
+  -d '{"title":"FAQ","content":"Our return policy is 30 days."}'
 
-#### Crawl Entire Website
-
-```bash
-curl -X POST http://localhost:8000/v1/knowledge/crawl-web \
+# Upload file
+curl -X POST http://localhost:8000/v1/knowledge/upload \
   -H "Authorization: Bearer kirana-default-api-key-change-me" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "url": "https://example.com/docs",
-    "max_pages": 50,
-    "max_depth": 3,
-    "path_prefix": "/docs/"
-  }'
+  -F "file=@handbook.pdf" -F "title=Employee Handbook"
 ```
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `url` | required | Starting URL |
-| `max_pages` | 50 | Maximum pages to crawl |
-| `max_depth` | 3 | Maximum link depth |
-| `path_prefix` | null | Only crawl URLs starting with this path |
+---
 
-**Note:** Uses Jina AI Reader for content extraction.
+## Deployment
 
-## Web Panel Usage
+### Docker Image (ghcr.io)
 
-The built-in admin panel provides a visual interface for managing Kirana.
-
-Access at: `http://localhost:8000/panel`
-
-### Dashboard
-- View API key for client integration
-- Usage statistics (total requests, tokens)
-- Quick access to all sections
-
-### Providers (Settings)
-- Add/edit LLM API providers
-- Configure API keys and base URLs
-- Set active provider
-- Set default models
-
-### Channels
-- Create channels with custom personalities
-- Set system prompts and parameters
-- Assign providers to channels
-- **Context Guard**: Restrict AI to specific domain
-- **Embed Configuration**: Enable/disable embed access
-
-### Sessions
-- View all chat sessions (including embed sessions)
-- Create new sessions with channel selection
-- Browse conversation history
-- Delete sessions
-
-### Knowledge
-- Add text/markdown knowledge
-- Upload files (PDF, Word, Excel, PPT, images)
-- Scrape/crawl websites
-- Search and manage knowledge items
-
-### Chat
-- Test chat completions
-- Switch between sessions
-- Real-time streaming display
-- View conversation history
-
-## Development
-
-### Local Development (without Docker)
+Pre-built multi-arch images (amd64 + arm64):
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Run database migrations
-alembic upgrade head
-
-# Start development server
-uvicorn app.main:app --reload --port 8000
-
-# In another terminal, start the web dev server
-cd web
-npm install
-npm run dev
+docker pull ghcr.io/utsmannn/kirana:latest
 ```
 
-### Running Tests
+**Available tags:**
+
+| Tag | Description |
+|-----|-------------|
+| `latest` | Latest stable release |
+| `v1.0.0` | Specific version |
+| `1.0` | Major.minor |
+
+### Creating a Release
 
 ```bash
-# Run all tests
-pytest
-
-# Run specific test file
-pytest tests/test_chat.py
-
-# Run with coverage
-pytest --cov=app
+git tag v1.0.0
+git push origin v1.0.0
 ```
 
-### Database Migrations
+GitHub Actions will:
+1. Build multi-arch Docker image
+2. Push to `ghcr.io/utsmannn/kirana`
+3. Create GitHub Release with changelog
 
-```bash
-# Create new migration
-alembic revision --autogenerate -m "description"
+### Production Checklist
 
-# Apply migrations
-alembic upgrade head
+- [ ] Change `KIRANA_API_KEY` to a strong random value
+- [ ] Change `ADMIN_PASSWORD` to a strong password
+- [ ] Set `SECRET_KEY` to a random 64-char hex string
+- [ ] Set `APP_ENV=production` and `DEBUG=false`
+- [ ] Configure CORS origins to your domain (not `*`)
+- [ ] Use a reverse proxy (nginx/Caddy) with TLS
+- [ ] Set up database backups for PostgreSQL
+- [ ] Configure `RATE_LIMIT_REQUESTS_PER_MINUTE` for production load
+- [ ] Mount persistent volumes for uploads, postgres, redis
 
-# Rollback
-alembic downgrade -1
-```
+---
 
 ## Project Structure
 
 ```
 kirana/
-├── app/                    # FastAPI backend
-│   ├── api/               # API routes
-│   │   └── v1/            # Version 1 endpoints
-│   ├── core/              # Core utilities (auth, rate limit, etc.)
-│   ├── db/                # Database configuration
-│   ├── models/            # SQLAlchemy models
-│   ├── schemas/           # Pydantic schemas
-│   └── services/          # Business logic
-├── web/                   # SvelteKit frontend
+├── app/                          # FastAPI backend
+│   ├── api/
+│   │   ├── deps.py               # Auth dependencies
+│   │   └── v1/                   # API v1 endpoints
+│   │       ├── admin.py          # Admin login/config
+│   │       ├── channels.py       # Channel CRUD + embed
+│   │       ├── chat.py           # Chat completions + WebSocket
+│   │       ├── clients.py        # External client registration
+│   │       ├── config.py         # Client config
+│   │       ├── knowledge.py      # Knowledge CRUD + upload + RAG indexing
+│   │       ├── personalities.py  # Personality templates
+│   │       ├── providers.py      # Provider credential CRUD
+│   │       ├── router.py         # Route aggregation
+│   │       ├── sessions.py       # Session CRUD
+│   │       ├── tools.py          # Tool listing + execution
+│   │       └── usage.py          # Usage statistics
+│   ├── config.py                 # Settings (env vars → Pydantic)
+│   ├── core/
+│   │   └── security.py           # API key generation + verification
+│   ├── db/
+│   │   └── session.py            # AsyncSession factory
+│   ├── models/                   # SQLAlchemy ORM models
+│   │   ├── channel.py
+│   │   ├── client.py
+│   │   ├── knowledge.py
+│   │   ├── knowledge_chunk.py    # pgvector chunks (RAG)
+│   │   └── ...
+│   ├── schemas/                  # Pydantic request/response schemas
+│   ├── services/
+│   │   ├── chat_service.py       # Chat orchestration + RAG injection
+│   │   ├── file_processor.py     # Legacy file extraction (fallback)
+│   │   ├── liteparse_parser.py   # LiteParse document parsing
+│   │   ├── mcp_client.py         # MCP server client
+│   │   ├── rag_chunking.py       # Text → chunks (tiktoken)
+│   │   ├── rag_embeddings.py     # Text → vectors (FastEmbed)
+│   │   ├── rag_ingestion.py      # Orchestrates parse → chunk → embed → store
+│   │   ├── rag_retrieval.py      # Vector search + context formatting
+│   │   └── stream_buffer.py      # SSE stream buffer for resume
+│   ├── tasks/                    # Background tasks (cleanup, etc.)
+│   ├── tools/                    # LLM tool implementations
+│   │   ├── base.py
+│   │   ├── datetime_tool.py
+│   │   ├── image_analyzer_tool.py
+│   │   └── knowledge_tool.py     # query_knowledge (vector-backed)
+│   └── main.py                   # FastAPI app factory
+├── web/                          # SvelteKit admin panel
 │   ├── src/
-│   │   ├── routes/        # Page routes
-│   │   └── lib/           # Components and utilities
-│   └── static/
-├── alembic/               # Database migrations
-├── scripts/               # Utility scripts
-├── docker-compose.yml     # Docker services
-└── Dockerfile             # Multi-stage build
+│   │   ├── routes/               # Page routes
+│   │   └── lib/
+│   │       ├── api.ts            # API client (typed)
+│   │       └── components/       # UI components
+│   └── vite.config.ts
+├── alembic/                      # Database migrations
+│   └── versions/
+├── scripts/
+│   ├── backfill_knowledge_chunks.py  # Backfill chunk embeddings
+│   ├── init_db.py
+│   └── seed_personalities.py
+├── docs/
+│   └── TECH_DOC.md               # Comprehensive technical reference
+├── docker-compose.yml            # Infrastructure (PostgreSQL + Redis)
+├── Dockerfile                    # Multi-stage production image
+├── Makefile                      # Local dev workflow
+├── requirements.txt
+└── pyproject.toml
 ```
-
-## API Compatibility
-
-Kirana implements the OpenAI Chat Completions API format:
-
-| OpenAI Feature | Status | Notes |
-|----------------|--------|-------|
-| Chat Completions | ✅ Full | `/v1/chat/completions` |
-| Streaming (SSE) | ✅ Full | Server-Sent Events |
-| Tool Calling | ✅ Full | Function calling support |
-| Multi-turn | ✅ Full | Via `session_id` |
-| Models | ⚠️ Partial | Use `/v1/config/` instead |
-
-### Supported Parameters
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `model` | string | Model identifier or "default" |
-| `messages` | array | Array of message objects |
-| `stream` | boolean | Enable SSE streaming |
-| `temperature` | float | Sampling temperature (0-2) |
-| `max_tokens` | integer | Maximum tokens to generate |
-| `tools` | array | Available function tools |
-| `tool_choice` | string | Tool selection strategy |
-| `session_id` | uuid | **Kirana:** Persist conversation |
-| `channel_id` | uuid | **Kirana:** Use specific channel |
-| `visitor_id` | string | **Kirana:** Unique visitor ID for embed sessions |
-| `stream_id` | string | **Kirana:** For stream resume |
-
-## Troubleshooting
-
-### Chat history not persisting
-- Ensure `session_id` is provided in chat requests
-- Check database connection and `conversation_logs` table
-- Verify session exists and is not expired
-
-### Streaming not working
-- Use `-N` flag with curl to disable buffering
-- Ensure client supports SSE (Server-Sent Events)
-- Check network timeouts for long responses
-
-### Rate limiting errors
-- Check Redis connection
-- Adjust `RATE_LIMIT_REQUESTS_PER_MINUTE` in .env
-- Disable with `RATE_LIMIT_ENABLED=false` for development
-
-## License
-
-MIT License - See LICENSE file for details.
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
 
 ---
 
-**Built with:** FastAPI · SvelteKit · PostgreSQL · Redis · LiteLLM
+## RAG Behavior
+
+**What happens when you chat after uploading knowledge:**
+
+1. User sends: *"What is the return policy?"*
+2. Kirana embeds the user query (FastEmbed, 384-dim)
+3. Searches `knowledge_chunks` via pgvector cosine distance
+4. Retrieves top-10 most relevant chunks (max 12,000 chars total)
+5. Injects into system prompt:
+   ```
+   ## KNOWLEDGE BASE CONTEXT
+   [S1] Return Policy
+   Source: knowledge/abc-123 | Type: text
+   Our return policy allows returns within 30 days of purchase.
+   [S2] Refund Process
+   Source: knowledge/abc-123 | Type: text
+   Refunds are processed within 5-7 business days.
+   ```
+6. LLM responds with citations: *"You can return items within 30 days [S1]. Refunds take 5-7 business days [S2]."*
+
+**The LLM is instructed to:**
+- Use retrieved context as primary source
+- Say "I don't have that information" if answer isn't in context
+- Cite sources with `[S1]`, `[S2]` when using knowledge base content
+- Respond in the same language the user used
+
+---
+
+## Context Guard
+
+Restrict a channel's AI to a specific domain.
+
+**Config (via admin panel or API):**
+- `context`: Short name (e.g., "Acme Corp", "SMK Negeri 1")
+- `context_description`: Detailed scope
+
+**Behavior with context guard:**
+
+| User asks | AI responds |
+|-----------|------------|
+| "What are your business hours?" | ✅ Answers (within context) |
+| "How do I apply?" | ✅ Answers (within context) |
+| "What's the weather today?" | ❌ "I can only answer questions about Acme Corp" |
+| "Tell me a joke" | ❌ Politely declines |
+
+**Without context guard:** AI answers any question freely.
+
+---
+
+## Tech Stack
+
+| Component | Technology | Why |
+|-----------|-----------|-----|
+| **Backend** | FastAPI (Python 3.11) | Async, OpenAPI docs, type-safe |
+| **Frontend** | SvelteKit | Fast builds, SPA mode, small bundle |
+| **Database** | PostgreSQL 16 + pgvector | Vector search without extra service |
+| **Cache** | Redis 7 | Rate limiting, session cache |
+| **LLM SDK** | OpenAI SDK (openai) | Direct, no litellm wrapper |
+| **Embeddings** | FastEmbed (sentence-transformers) | Local, no API calls, 384-dim |
+| **Chunking** | tiktoken (cl100k_base) | Same tokenizer as GPT-4 |
+| **Parsing** | LiteParse | OCR-enabled, page/bbox provenance |
+| **Container** | Docker (multi-arch) | amd64 + arm64, ghcr.io registry |
+
+---
+
+## Troubleshooting
+
+### 401 on chat/upload/download after login
+The admin panel login gives you an admin token. Make sure the frontend sends this token correctly. If using API directly, ensure your `Authorization: Bearer <token>` header is set.
+
+### RAG not retrieving
+- Check `RAG_ENABLED=true` in `.env`
+- Verify chunks exist: knowledge items created before the RAG migration need backfill: `python scripts/backfill_knowledge_chunks.py --only-active`
+- Check that the knowledge item is `is_active=true`
+
+### Upload not parsing
+- LiteParse handles PDF, DOCX, TXT, CSV natively
+- For `.doc` files: convert to `.docx` first
+- For scanned PDFs: ensure `LITEPARSE_OCR_ENABLED=true` and Tesseract is installed
+
+### Streaming not working
+- Use `-N` flag with curl (disables output buffering)
+- Ensure client reads SSE events properly (look for `data: [DONE]`)
+- For WebSocket: ensure the connection URL includes auth (`?token=...`)
+
+### Provider not being used (falls back to .env)
+- Check the channel's `provider_id` references an active provider
+- Check `is_active=true` on the provider
+- The `.env` values (`OPENAI_API_KEY`, `OPENAI_BASE_URL`) are only used as fallback when no provider is configured
+
+---
+
+## License
+
+MIT
+
+---
+
+**Built with:** FastAPI · SvelteKit · PostgreSQL/pgvector · Redis · FastEmbed · LiteParse · tiktoken · OpenAI SDK
