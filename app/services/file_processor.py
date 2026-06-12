@@ -335,7 +335,7 @@ class FileProcessor:
             error_str = str(e).lower()
             if 'not a word file' in error_str or 'content type' in error_str:
                 logger.warning("[FILE_PROCESSOR] File is not a valid .docx (maybe old .doc format?)")
-                metadata['error'] = 'Format .doc (Word 97-2003) tidak didukung. Silakan convert ke .docx (Word 2007+) dan upload ulang.'
+                metadata['error'] = '.doc format (Word 97-2003) is not supported. Please convert to .docx (Word 2007+) and re-upload.'
                 metadata['unsupported_format'] = 'doc_legacy'
                 return "", metadata
             logger.exception("[FILE_PROCESSOR] Word extraction failed: %s", e)

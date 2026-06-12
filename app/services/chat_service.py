@@ -4,7 +4,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
-import litellm
+from openai import AsyncOpenAI
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,8 +12,10 @@ from app.config import settings
 from app.models.channel import Channel
 from app.models.conversation import ConversationLog
 from app.models.knowledge import Knowledge
+from app.models.provider import ProviderCredential
 from app.models.session import Session
 from app.schemas.chat import ChatCompletionRequest, ChatCompletionResponse
+from app.services.rag_retrieval import retrieve_context
 from app.tools.registry import tool_registry
 
 logger = logging.getLogger(__name__)
@@ -51,7 +53,10 @@ class ChatService:
         elif has_context:
             # If context exists but no custom system prompt, use minimal generic prompt
             # The context guard will provide identity
-            prompt = "Jawab pertanyaan user dengan membantu dan informatif."
+            prompt = (
+                "Answer user questions helpfully and informatively. "
+                "Always respond in the same language as the user."
+            )
         else:
             # Fallback to global settings (only when no context)
             ai_name = getattr(settings, 'AI_NAME', 'Kirana')
@@ -101,75 +106,81 @@ class ChatService:
 
     def _build_context_guard(self, context: str, description: Optional[str] = None) -> str:
         """Build strong context guard prompt."""
-        guard = f"""## IDENTITAS & BATASAN
+        guard = f"""## IDENTITY & SCOPE
 
-Anda adalah asisten untuk: {context}"""
+You are an assistant for: {context}"""
 
         if description:
-            guard += f"\n\nDeskripsi: {description}"
+            guard += f"\n\nDescription: {description}"
 
         guard += f"""
 
-## ATURAN KETAT (WAJIB DIPATUHI):
+## STRICT RULES (MUST BE FOLLOWED):
 
-0. **PENTING: Anda WAJIB selalu memberikan respons untuk SETIAP pertanyaan. JANGAN pernah diam atau tidak menjawab.**
+0. **IMPORTANT: You MUST always provide a response to EVERY question. NEVER stay silent or refuse to answer.**
 
-1. Anda HANYA boleh menjawab pertanyaan yang BERKAITAN dengan {context}.
-2. TIDAK BOLEH menjawab pertanyaan di luar scope tersebut, TERMASUK:
-   - Pertanyaan umum (cuaca, berita, fakta dunia, gosip, dll)
-   - Permintaan cerita, puisi, lagu, kode pemrograman, atau kreativitas umum
-   - Pertanyaan pribadi tentang diri Anda sebagai AI
-   - Topik politik, agama, atau sensitif lainnya
-   - Pertanyaan tentang selebriti, hiburan, atau budaya pop
-   - Permintaan untuk bermain game, teka-teki, atau lelucon
-   - Apapun yang TIDAK berkaitan dengan {context}
+1. You may ONLY answer questions RELATED to {context}.
+2. You MUST NOT answer questions outside this scope, INCLUDING:
+   - General knowledge questions (weather, news, world facts, gossip, etc.)
+   - Requests for stories, poems, songs, code, or general creativity
+   - Personal questions about yourself as an AI
+   - Political, religious, or other sensitive topics
+   - Questions about celebrities, entertainment, or pop culture
+   - Requests to play games, puzzles, or tell jokes
+   - Anything NOT related to {context}
 
-3. Jika user bertanya di luar scope:
-   - Tolak dengan SOPAN dan TEGAS
-   - Sebutkan bahwa Anda adalah asisten untuk {context}
-   - Tawarkan bantuan yang RELEVAN dengan {context}
-   - JANGAN sekali-kali menjawab pertanyaan tersebut meskipun user memaksa
+3. If the user asks a question outside your scope:
+   - Decline POLITELY and FIRMLY
+   - State that you are an assistant for {context}
+   - Offer help that is RELEVANT to {context}
+   - NEVER answer the question, even if the user insists
 
-4. Jika pertanyaan RELEVAN dengan {context} tapi informasi spesifiknya TIDAK ADA di knowledge base:
-   - Katakan dengan JUJUR bahwa informasi tersebut belum tersedia di sistem
-   - JANGAN mengarang informasi
-   - Tawarkan untuk membantu pertanyaan lain yang terkait
+4. If the question IS relevant to {context} but the specific information is NOT in the knowledge base:
+   - HONESTLY state that the information is not yet available in the system
+   - NEVER fabricate information
+   - Offer to help with other related questions
 
-5. Jangan pernah keluar dari karakter atau mengakui bahwa Anda dibatasi. Tetap profesional.
+5. Never break character or admit you are restricted. Stay professional.
 
-## CONTOH RESPONS:
+## RESPONSE STYLE:
+Always respond in the same language the user used in their query.
 
-**Untuk pertanyaan RELEVAN tapi info tidak ada:**
-- "Mengenai hal tersebut, informasinya belum tersedia di sistem kami. Apakah ada pertanyaan lain seputar {context} yang bisa saya bantu?"
-- "Maaf, detail itu belum saya miliki di database. Silakan hubungi pihak {context} langsung atau tanyakan hal lain."
+## EXAMPLE RESPONSES:
 
-**Untuk pertanyaan DI LUAR scope:**
-- "Maaf, saya adalah asisten untuk {context}. Saya hanya bisa membantu pertanyaan seputar {context}. Ada yang bisa saya bantu terkait {context}?"
-- "Pertanyaan itu di luar cakupan saya sebagai asisten {context}. Silakan tanyakan hal yang berkaitan dengan {context}." """
+**For RELEVANT questions where info is unavailable:**
+- "Regarding that, the information is not yet available in our system. Is there another question about {context} I can help with?"
+- "Sorry, I don't have that detail in my database. Please contact {context} directly or ask something else."
+
+**For OUT-OF-SCOPE questions:**
+- "Sorry, I am an assistant for {context}. I can only help with questions about {context}. Is there anything I can help with related to {context}?"
+- "That question is outside my scope as a {context} assistant. Please ask something related to {context}." """
 
         return guard
 
     def _build_knowledge_only_guard(self) -> str:
         """Build knowledge-only guard prompt (when no context but knowledge exists)."""
-        return """## BATASAN PENGETAHUAN
+        return """## KNOWLEDGE SCOPE
 
-Anda memiliki akses ke knowledge base yang telah disediakan.
+You have access to a knowledge base that has been provided.
 
-## ATURAN:
+## RULES:
 
-0. **PENTING: Anda WAJIB selalu memberikan respons untuk SETIAP pertanyaan. JANGAN pernah diam atau tidak menjawab.**
+0. **IMPORTANT: You MUST always provide a response to EVERY question. NEVER stay silent or refuse to answer.**
 
-1. Prioritaskan menjawab berdasarkan informasi yang ada di knowledge base.
-2. Jika pertanyaan TIDAK berkaitan dengan informasi di knowledge base atau informasi tidak tersedia:
-   - Jawab dengan JUJUR bahwa informasi tersebut tidak tersedia di sistem
-   - TAWARKAN bantuan untuk pertanyaan lain
-   - JANGAN mengarang informasi
-3. Tetap ramah dan membantu meskipun tidak bisa menjawab spesifik.
+1. Prioritize answering based on information available in the knowledge base.
+2. If the question is NOT related to the knowledge base or the information is unavailable:
+   - HONESTLY state that the information is not available in the system
+   - OFFER to help with other questions
+   - NEVER fabricate information
+3. Stay friendly and helpful even when you cannot provide a specific answer.
 
-## CONTOH RESPONS:
-- "Maaf, informasi tersebut belum tersedia di database saya. Apakah ada pertanyaan lain yang bisa saya bantu?"
-- "Saya belum memiliki data tentang hal itu. Silakan tanyakan hal lain atau hubungi pihak terkait."
-- "Detail itu tidak ada di sistem kami saat ini. Ada yang lain yang ingin Anda ketahui?"
+## RESPONSE STYLE:
+Always respond in the same language the user used in their query.
+
+## EXAMPLE RESPONSES:
+- "Sorry, that information is not available in my database. Is there anything else I can help with?"
+- "I don't have data about that yet. Please ask something else or contact the relevant party."
+- "That detail is not in our system right now. Is there anything else you'd like to know?"
  """
 
     async def _execute_tool_calls(
@@ -228,6 +239,16 @@ Anda memiliki akses ke knowledge base yang telah disediakan.
 
         return results
 
+    def _build_client(self, api_key: str, api_base: Optional[str]) -> AsyncOpenAI:
+        kwargs: Dict[str, Any] = {
+            "api_key": api_key,
+            "max_retries": settings.LLM_MAX_RETRIES,
+            "timeout": float(settings.LLM_TIMEOUT),
+        }
+        if api_base:
+            kwargs["base_url"] = api_base
+        return AsyncOpenAI(**kwargs)
+
     async def _prepare_completion(
         self,
         request: ChatCompletionRequest,
@@ -278,6 +299,31 @@ Anda memiliki akses ke knowledge base yang telah disediakan.
 
         # Build system prompt with channel config
         system_prompt = await self.build_system_prompt(channel)
+
+        latest_user_message = next(
+            (msg.content for msg in reversed(request.messages) if msg.role == "user"),
+            "",
+        )
+        if latest_user_message and settings.RAG_ENABLED:
+            try:
+                rag_result = await retrieve_context(
+                    self.db,
+                    latest_user_message,
+                    channel_context=channel.context if channel else None,
+                    channel_description=channel.context_description if channel else None,
+                )
+                if rag_result.context:
+                    system_prompt += (
+                        "\n\n## KNOWLEDGE BASE CONTEXT\n"
+                        "Use the following context as your primary source when answering. "
+                        "If information is not in the context, honestly say it is not available. "
+                        "Cite [S1], [S2], etc. when relevant.\n\n"
+                        f"{rag_result.context}"
+                    )
+                    logger.info("[RAG] Injected %d retrieved chunks", len(rag_result.chunks))
+            except Exception as e:
+                logger.warning("[RAG] Retrieval failed, continuing without RAG context: %s", e)
+
         messages = [{"role": "system", "content": system_prompt}]
 
         # Load session history
@@ -298,15 +344,38 @@ Anda memiliki akses ke knowledge base yang telah disediakan.
 
         model = request.model if request.model != "default" else settings.DEFAULT_MODEL
 
-        completion_kwargs = {
+        # Resolve provider credentials: channel provider > default from .env
+        api_key = settings.OPENAI_API_KEY
+        api_base = settings.OPENAI_BASE_URL
+        if channel:
+            p_result = await self.db.execute(
+                select(ProviderCredential).where(
+                    ProviderCredential.id == channel.provider_id,
+                    ProviderCredential.is_active.is_(True),
+                )
+            )
+            provider = p_result.scalar_one_or_none()
+            if provider:
+                api_key = provider.api_key
+                api_base = provider.base_url or api_base
+                model = provider.model if request.model == "default" else model
+                logger.info(
+                    "[PROVIDER] Using channel provider: %s (model=%s)",
+                    provider.name, model,
+                )
+            else:
+                logger.warning(
+                    "[PROVIDER] Channel provider inactive/not found, falling back to .env"
+                )
+
+        completion_kwargs: Dict[str, Any] = {
             "model": model,
             "messages": messages,
             "temperature": request.temperature,
             "max_tokens": request.max_tokens or 4096,
-            "api_key": settings.OPENAI_API_KEY,
-            "timeout": settings.LLM_TIMEOUT,
-            "num_retries": settings.LLM_MAX_RETRIES,
         }
+
+        client = self._build_client(api_key, api_base)
 
         # Add tools if available and not disabled
         # Only pass user-facing tools to LLM (internal tools are for system use only)
@@ -316,12 +385,7 @@ Anda memiliki akses ke knowledge base yang telah disediakan.
             completion_kwargs["tool_choice"] = request.tool_choice or "auto"
             logger.info("[TOOL] Passing %d user-facing tools to LLM", len(user_tools))
 
-        if settings.OPENAI_BASE_URL:
-            completion_kwargs["api_base"] = settings.OPENAI_BASE_URL
-            if "/" not in model:
-                completion_kwargs["model"] = f"openai/{model}"
-
-        return completion_kwargs, session, model, messages
+        return completion_kwargs, session, model, messages, client
 
     async def _save_conversation(
         self,
@@ -372,10 +436,10 @@ Anda memiliki akses ke knowledge base yang telah disediakan.
         request: ChatCompletionRequest,
     ) -> ChatCompletionResponse:
         """Create a chat completion with tool support."""
-        completion_kwargs, session, model, messages = await self._prepare_completion(request)
+        completion_kwargs, session, model, messages, client = await self._prepare_completion(request)
 
         start_time = time.monotonic()
-        response = await litellm.acompletion(**completion_kwargs)
+        response = await client.chat.completions.create(**completion_kwargs)
         latency_ms = int((time.monotonic() - start_time) * 1000)
 
         message = response.choices[0].message
@@ -386,14 +450,17 @@ Anda memiliki akses ke knowledge base yang telah disediakan.
         if message.tool_calls:
             logger.info("[TOOL] LLM requested %d tool calls", len(message.tool_calls))
 
+            # Convert tool_calls to dicts for execute and for messages
+            tool_calls_dicts = [tc.model_dump() for tc in message.tool_calls]
+
             # Execute tools
-            tool_results = await self._execute_tool_calls(message.tool_calls)
+            tool_results = await self._execute_tool_calls(tool_calls_dicts)
 
             # Build new messages with tool calls and results
             messages.append({
                 "role": "assistant",
                 "content": content,
-                "tool_calls": [tc.model_dump() if hasattr(tc, "model_dump") else tc for tc in message.tool_calls]
+                "tool_calls": tool_calls_dicts,
             })
             messages.extend(tool_results)
 
@@ -404,14 +471,14 @@ Anda memiliki akses ke knowledge base yang telah disediakan.
             completion_kwargs.pop("tool_choice", None)
 
             logger.info("[TOOL] Re-calling LLM with tool results")
-            final_response = await litellm.acompletion(**completion_kwargs)
+            final_response = await client.chat.completions.create(**completion_kwargs)
             content = final_response.choices[0].message.content or ""
             usage = final_response.usage
             latency_ms = int((time.monotonic() - start_time) * 1000)
 
         logger.info(
             "Chat completion: model=%s tokens=%d latency=%dms",
-            model, usage.total_tokens, latency_ms,
+            model, usage.total_tokens if usage else 0, latency_ms,
         )
 
         if session:
@@ -434,9 +501,9 @@ Anda memiliki akses ke knowledge base yang telah disediakan.
                 }
             ],
             usage={
-                "prompt_tokens": usage.prompt_tokens,
-                "completion_tokens": usage.completion_tokens,
-                "total_tokens": usage.total_tokens,
+                "prompt_tokens": usage.prompt_tokens if usage else 0,
+                "completion_tokens": usage.completion_tokens if usage else 0,
+                "total_tokens": usage.total_tokens if usage else 0,
             },
             session={"id": str(session.id)} if session else None,
         )
@@ -450,12 +517,12 @@ Anda memiliki akses ke knowledge base yang telah disediakan.
         Fully streaming: streams the first LLM call, intercepts tool_calls
         from the stream if any, executes tools, then streams the second call.
         """
-        completion_kwargs, session, model, messages = await self._prepare_completion(request)
+        completion_kwargs, session, model, messages, client = await self._prepare_completion(request)
         completion_kwargs["stream"] = True
 
         start_time = time.monotonic()
 
-        response = await litellm.acompletion(**completion_kwargs)
+        response = await client.chat.completions.create(**completion_kwargs)
 
         full_content = ""
         tool_calls_accum: Dict[int, Dict[str, Any]] = {}
@@ -486,9 +553,9 @@ Anda memiliki akses ke knowledge base yang telah disediakan.
                 continue
 
             # Regular content - yield to client immediately
-            content = delta.content or ""
-            if content:
-                full_content += content
+            chunk_content = delta.content or ""
+            if chunk_content:
+                full_content += chunk_content
                 yield f"data: {json.dumps(chunk.model_dump())}\n\n"
             # Skip chunks with only reasoning_content and no actual content
 
@@ -514,12 +581,12 @@ Anda memiliki akses ke knowledge base yang telah disediakan.
             completion_kwargs.pop("tool_choice", None)
 
             logger.info("[TOOL STREAM] Streaming final answer with tool results")
-            final_response = await litellm.acompletion(**completion_kwargs)
+            final_response = await client.chat.completions.create(**completion_kwargs)
 
             async for chunk in final_response:
-                content = chunk.choices[0].delta.content or ""
-                if content:
-                    full_content += content
+                chunk_content = chunk.choices[0].delta.content or ""
+                if chunk_content:
+                    full_content += chunk_content
                     yield f"data: {json.dumps(chunk.model_dump())}\n\n"
 
         yield "data: [DONE]\n\n"

@@ -1,3 +1,4 @@
+import hashlib
 from typing import Optional, Tuple
 
 from fastapi import Depends, HTTPException, Query, Security, status
@@ -15,16 +16,19 @@ security_scheme = HTTPBearer()
 async def verify_api_key(
     token: HTTPAuthorizationCredentials = Security(security_scheme)
 ) -> str:
-    """Verify the API key matches the configured KIRANA_API_KEY."""
+    """Verify the API key matches the configured KIRANA_API_KEY or admin token."""
     api_key = token.credentials
 
-    if api_key != settings.KIRANA_API_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key",
-        )
+    if api_key == settings.KIRANA_API_KEY:
+        return api_key
 
-    return api_key
+    if verify_admin_token(api_key):
+        return api_key
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid API key or admin token",
+    )
 
 
 async def verify_api_key_optional(
@@ -50,13 +54,16 @@ async def verify_api_key_optional(
             detail="API key required (via Authorization header or api_key query param)",
         )
 
-    if key != settings.KIRANA_API_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key",
-        )
+    if key == settings.KIRANA_API_KEY:
+        return key
 
-    return key
+    if verify_admin_token(key):
+        return key
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid API key or admin token",
+    )
 
 
 async def verify_api_key_or_embed_token(
@@ -161,3 +168,45 @@ async def verify_api_key_or_admin_token(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid API key or admin token",
     )
+
+
+async def get_current_client(
+    token: Optional[HTTPAuthorizationCredentials] = Security(
+        HTTPBearer(auto_error=False)
+    ),
+    api_key: Optional[str] = Query(None, description="API key (alternative to header)"),
+    db: AsyncSession = Depends(get_db),
+) -> "Client":
+    """Get the authenticated client from bearer token (client API key).
+
+    Looks up the token in the clients table using SHA256 hash matching.
+    Used by external API consumers who registered via POST /v1/clients.
+    """
+    from app.models.client import Client
+
+    cred = None
+    if token:
+        cred = token.credentials
+    elif api_key:
+        cred = api_key
+
+    if not cred:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Client API key required (via Authorization header or api_key query param)",
+        )
+
+    # Hash the raw key and look up client
+    hashed = hashlib.sha256(cred.encode()).hexdigest()
+    result = await db.execute(
+        select(Client).where(Client.api_key == hashed, Client.is_active.is_(True))
+    )
+    client = result.scalar_one_or_none()
+
+    if not client:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or inactive client API key",
+        )
+
+    return client

@@ -8,12 +8,15 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
-# Ensure uploads directory exists
-UPLOADS_DIR = Path("/app/uploads/knowledge")
-UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-
 from app.api.v1.router import api_router
 from app.config import settings
+
+# Ensure uploads directory exists
+UPLOADS_DIR = Path(settings.UPLOAD_DIR) / "knowledge"
+try:
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:
+    pass
 from app.core.exceptions import (
     KiranaException,
     generic_exception_handler,
@@ -181,11 +184,17 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 app.add_middleware(RateLimitMiddleware)
 
 # Serve uploaded files (for image analysis)
-app.mount(
-    "/uploads",
-    StaticFiles(directory=str(UPLOADS_DIR.parent), html=False),
-    name="uploads",
-)
+if UPLOADS_DIR.parent.exists():
+    app.mount(
+        "/uploads",
+        StaticFiles(directory=str(UPLOADS_DIR.parent), html=False),
+        name="uploads",
+    )
+else:
+    logger.warning(
+        "Uploads directory %s does not exist; /uploads not mounted",
+        UPLOADS_DIR.parent,
+    )
 
 # Admin panel (static SvelteKit build with SPA fallback)
 if PANEL_DIR.exists():

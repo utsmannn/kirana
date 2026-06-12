@@ -10,10 +10,12 @@ from typing import Any, Dict
 from app.services.mcp_client import mcp_manager
 from app.tools.base import BaseTool
 
+from app.config import settings
+
 logger = logging.getLogger(__name__)
 
 # Upload directory for local files
-UPLOAD_DIR = Path("/app/uploads/knowledge")
+UPLOAD_DIR = Path(settings.UPLOAD_DIR) / "knowledge"
 
 
 class ImageAnalyzerTool(BaseTool):

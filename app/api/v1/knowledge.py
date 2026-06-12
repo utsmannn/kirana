@@ -4,10 +4,11 @@ import os
 import uuid
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
-import litellm
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
+from openai import AsyncOpenAI
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,7 +26,13 @@ from app.schemas.knowledge import (
     WebScrapeResponse,
 )
 from app.services.file_processor import FileProcessor, get_mime_type
-from app.services.web_scraper import WebScraper, crawl_website, scrape_single_url
+from app.services.liteparse_parser import (
+    ParsedDocument,
+    parse_document_generic,
+    parse_document_smart,
+)
+from app.services.rag_ingestion import index_knowledge
+from app.services.web_scraper import crawl_website, scrape_single_url
 from app.services.zai_vision import get_zai_vision_service, is_zai_vision_configured
 
 logger = logging.getLogger(__name__)
@@ -34,7 +41,10 @@ router = APIRouter()
 
 # Upload directory for knowledge files (from config, defaults to /app/uploads)
 UPLOAD_DIR = Path(settings.UPLOAD_DIR) / "knowledge"
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:
+    pass  # handled later during actual upload
 logger.info("[KNOWLEDGE] Upload directory: %s", UPLOAD_DIR)
 
 # Supported types for Z.AI Vision analysis (images + PDFs)
@@ -47,6 +57,45 @@ VISION_TYPES = {
 SUPPORTED_IMAGE_TYPES = {
     'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp'
 }
+
+LITEPARSE_TYPES = {
+    'application/pdf',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+}
+
+
+def _try_liteparse(file_path: Path, mime_type: str) -> ParsedDocument | None:
+    if not settings.LITEPARSE_ENABLED or mime_type not in LITEPARSE_TYPES:
+        return None
+    try:
+        return parse_document_smart(file_path)
+    except Exception as e:
+        logger.warning("[UPLOAD] LiteParse smart parsing failed, trying generic: %s", e)
+    try:
+        return parse_document_generic(file_path)
+    except Exception as e:
+        logger.warning("[UPLOAD] LiteParse generic parsing failed, falling back: %s", e)
+        return None
+
+
+async def _ai_analyze(prompt: str, model: str | None = None) -> str:
+    api_key = settings.OPENAI_API_KEY
+    base_url = settings.OPENAI_BASE_URL or None
+    client_kwargs = {"api_key": api_key}
+    if base_url:
+        client_kwargs["base_url"] = base_url
+    client = AsyncOpenAI(**client_kwargs)
+
+    model_name = model or settings.DEFAULT_MODEL or "gpt-4o-mini"
+    response = await client.chat.completions.create(
+        model=model_name,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3,
+        max_tokens=2048,
+    )
+    return response.choices[0].message.content or ""
 
 
 @router.post(
@@ -64,6 +113,8 @@ async def create_knowledge(
         extra_metadata=knowledge_in.metadata or {},
     )
     db.add(knowledge)
+    await db.flush()
+    await index_knowledge(db, knowledge)
     await db.commit()
     await db.refresh(knowledge)
     return knowledge
@@ -151,8 +202,16 @@ async def update_knowledge(
     if "metadata" in update_data:
         update_data["extra_metadata"] = update_data.pop("metadata")
 
+    should_reindex = any(
+        field in update_data
+        for field in ("title", "content", "content_type", "extra_metadata", "is_active")
+    )
+
     for field, value in update_data.items():
         setattr(knowledge, field, value)
+
+    if should_reindex:
+        await index_knowledge(db, knowledge)
 
     await db.commit()
     await db.refresh(knowledge)
@@ -251,12 +310,24 @@ async def upload_knowledge_file(
         'file_size': file_size,
     }
 
+    parsed_document = _try_liteparse(file_path, mime_type)
+    if parsed_document is not None:
+        extracted_text = parsed_document.text
+        metadata["analysis_method"] = "liteparse"
+        metadata["analysis_success"] = True
+        metadata["parser"] = parsed_document.parser
+        metadata["parsing_status"] = parsed_document.parsing_status
+        metadata["pages"] = len(parsed_document.pages)
+        metadata["raw_text_length"] = len(parsed_document.text)
+
     # Check if file should be analyzed with Vision AI (images + PDFs)
     is_vision_type = mime_type in VISION_TYPES
     is_pdf = mime_type == 'application/pdf'
     is_image = mime_type in SUPPORTED_IMAGE_TYPES
 
-    if is_vision_type:
+    if parsed_document is not None:
+        logger.info("[UPLOAD] LiteParse extraction complete: %d chars", len(extracted_text))
+    elif is_vision_type:
         logger.info("[UPLOAD] %s detected",
                    "PDF" if is_pdf else "Image")
 
@@ -280,50 +351,32 @@ async def upload_knowledge_file(
                 metadata["raw_text_length"] = len(pdf_text)
 
                 try:
-                    # Use litellm same pattern as chat_service
                     model = settings.DEFAULT_MODEL or "gpt-4o-mini"
-                    analysis_prompt = f"""Analisa dokumen berikut dan berikan:
+                    analysis_prompt = f"""Analyze the following document and provide:
 
-1. RINGKASAN singkat (2-3 kalimat)
-2. POIN-POIN PENTING dalam bullet points
+1. A brief SUMMARY (2-3 sentences)
+2. KEY POINTS in bullet points
 
-Dokumen:
+Document:
 {pdf_text}
 
-Format output:
-## Ringkasan
-[ringkasan singkat]
+Output format:
+## Summary
+[brief summary]
 
-## Poin Penting
-- [poin 1]
-- [poin 2]
-- dst..."""
+## Key Points
+- [point 1]
+- [point 2]
+- etc..."""
 
-                    completion_kwargs = {
-                        "model": model,
-                        "messages": [{"role": "user", "content": analysis_prompt}],
-                        "temperature": 0.3,
-                        "max_tokens": 2048,
-                        "api_key": settings.OPENAI_API_KEY,
-                        "timeout": 60,
-                        "num_retries": 1,
-                    }
-
-                    # Add api_base if configured (same pattern as chat_service)
-                    if settings.OPENAI_BASE_URL:
-                        completion_kwargs["api_base"] = settings.OPENAI_BASE_URL
-                        if "/" not in model:
-                            completion_kwargs["model"] = f"openai/{model}"
-
-                    response = await litellm.acompletion(**completion_kwargs)
-                    ai_summary = response.choices[0].message.content or ""
+                    ai_summary = await _ai_analyze(analysis_prompt, model)
 
                     # Combine: AI summary + raw text
                     extracted_text = f"""{ai_summary}
 
 ---
 
-## Dokumen Asli
+## Original Document
 
 {pdf_text}"""
 
@@ -463,7 +516,7 @@ Be exhaustive - capture 100% of the text."""
             logger.info("[UPLOAD] Excel detected, converting sheets to images...")
 
             if not is_zai_vision_configured():
-                raise HTTPException(status_code=400, detail="Excel memerlukan Z.AI Vision API. Set ZAI_API_KEY untuk mengaktifkan.")
+                raise HTTPException(status_code=400, detail="Excel requires Z.AI Vision API. Set ZAI_API_KEY to enable it.")
 
             try:
                 # Step 1: Convert sheets to images
@@ -471,40 +524,40 @@ Be exhaustive - capture 100% of the text."""
                 metadata.update(img_metadata)
 
                 if not images:
-                    raise HTTPException(status_code=400, detail="Tidak ada data di file Excel")
+                    raise HTTPException(status_code=400, detail="No data found in Excel file")
 
                 logger.info("[UPLOAD] Converted %d sheets to images, sending to Vision API", len(images))
 
                 # Step 2: Analyze with Vision API
                 zai_vision = get_zai_vision_service()
 
-                excel_prompt = f"""Baca dan ekstrak SEMUA data dari spreadsheet Excel ini yang memiliki {len(images)} sheet.
+                excel_prompt = f"""Read and extract ALL data from this Excel spreadsheet which has {len(images)} sheets.
 
-TUGAS UTAMA: Ekstrak data secara LENGKAP dan AKURAT agar bisa di-query tanpa perlu file asli.
+MAIN TASK: Extract data COMPLETELY and ACCURATELY so it can be queried without the original file.
 
-Untuk SETIAP sheet, berikan:
+For EACH sheet, provide:
 
-## Sheet: [nama sheet]
+## Sheet: [sheet name]
 
-### Struktur
-- Jumlah kolom: X
-- Nama kolom: [list semua kolom]
+### Structure
+- Column count: X
+- Column names: [list all columns]
 
-### Data Lengkap
-| Kolom1 | Kolom2 | Kolom3 | ... |
-|--------|--------|--------|-----|
-| value1 | value2 | value3 | ... |
-| ...    | ...    | ...    | ... |
+### Complete Data
+| Col1 | Col2 | Col3 | ... |
+|------|------|------|-----|
+| val1 | val2 | val3 | ... |
+| ...  | ...  | ...  | ... |
 
-### Catatan
-- Total baris: X
-- [info penting lainnya]
+### Notes
+- Total rows: X
+- [other important info]
 
-PENTING:
-- Transcribe SEMUA nilai yang terlihat dengan akurat
-- Jangan summarize atau skip data apapun
-- Format angka dan tanggal persis seperti di gambar
-- Jika ada cell kosong, tulis "[kosong]" """
+IMPORTANT:
+- Transcribe ALL visible values accurately
+- Do NOT summarize or skip any data
+- Format numbers and dates exactly as shown in the image
+- If a cell is empty, write "[empty]" """
 
                 result = await asyncio.wait_for(
                     zai_vision.analyze_multiple_images(images=images, prompt=excel_prompt),
@@ -517,7 +570,7 @@ PENTING:
                     metadata["analysis_success"] = True
                     logger.info("[UPLOAD] Excel Vision analysis complete: %d chars", len(extracted_text))
                 else:
-                    raise HTTPException(status_code=400, detail=f"Vision API gagal: {result.get('error', 'Unknown error')}")
+                    raise HTTPException(status_code=400, detail=f"Vision API failed: {result.get('error', 'Unknown error')}")
 
             except asyncio.TimeoutError:
                 raise HTTPException(status_code=400, detail="Excel analysis timed out")
@@ -525,7 +578,7 @@ PENTING:
                 raise
             except Exception as e:
                 logger.exception("[UPLOAD] Excel processing failed: %s", e)
-                raise HTTPException(status_code=400, detail=f"Gagal memproses Excel: {str(e)}")
+                raise HTTPException(status_code=400, detail=f"Failed to process Excel: {str(e)}")
 
         # ============ WORD, PPT, TEXT: Extract text -> AI analysis ============
         elif is_word or is_ppt or is_text:
@@ -555,47 +608,31 @@ PENTING:
 
                     doc_type_name = "Word" if is_word else "PowerPoint"
 
-                    analysis_prompt = f"""Analisa dokumen {doc_type_name} berikut dan berikan:
+                    analysis_prompt = f"""Analyze the following {doc_type_name} document and provide:
 
-1. RINGKASAN singkat (2-3 kalimat)
-2. POIN-POIN PENTING dalam bullet points
+1. A brief SUMMARY (2-3 sentences)
+2. KEY POINTS in bullet points
 
-Dokumen:
+Document:
 {doc_text}
 
-Format output:
-## Ringkasan
-[ringkasan singkat]
+Output format:
+## Summary
+[brief summary]
 
-## Poin Penting
-- [poin 1]
-- [poin 2]
-- dst..."""
+## Key Points
+- [point 1]
+- [point 2]
+- etc..."""
 
-                    completion_kwargs = {
-                        "model": model,
-                        "messages": [{"role": "user", "content": analysis_prompt}],
-                        "temperature": 0.3,
-                        "max_tokens": 2048,
-                        "api_key": settings.OPENAI_API_KEY,
-                        "timeout": 60,
-                        "num_retries": 1,
-                    }
-
-                    if settings.OPENAI_BASE_URL:
-                        completion_kwargs["api_base"] = settings.OPENAI_BASE_URL
-                        if "/" not in model:
-                            completion_kwargs["model"] = f"openai/{model}"
-
-                    response = await litellm.acompletion(**completion_kwargs)
-                    ai_summary = response.choices[0].message.content or ""
+                    ai_summary = await _ai_analyze(analysis_prompt, model)
 
                     # Combine: AI summary + raw text
                     extracted_text = f"""{ai_summary}
 
 ---
 
-## Dokumen Asli
+## Original Document
 
 {doc_text}"""
 
@@ -619,7 +656,7 @@ Format output:
                 if doc_metadata.get('unsupported_format') == 'doc_legacy':
                     raise HTTPException(status_code=400, detail=error_msg)
                 else:
-                    raise HTTPException(status_code=400, detail=f"Gagal mengekstrak teks: {error_msg}")
+                    raise HTTPException(status_code=400, detail=f"Failed to extract text: {error_msg}")
 
         else:
             # Unsupported file type
@@ -668,6 +705,8 @@ Format output:
         extra_metadata=metadata,
     )
     db.add(knowledge)
+    await db.flush()
+    await index_knowledge(db, knowledge, parsed_document=parsed_document)
     await db.commit()
     await db.refresh(knowledge)
 
@@ -711,6 +750,8 @@ async def scrape_web_url(
             },
         )
         db.add(knowledge)
+        await db.flush()
+        await index_knowledge(db, knowledge)
         await db.commit()
         await db.refresh(knowledge)
 
@@ -800,6 +841,8 @@ async def crawl_web_site(
             },
         )
         db.add(knowledge)
+        await db.flush()
+        await index_knowledge(db, knowledge)
         await db.commit()
         await db.refresh(knowledge)
 

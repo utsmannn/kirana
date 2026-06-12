@@ -40,3 +40,4 @@ class Knowledge(Base):
     updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
     client = relationship("Client", back_populates="knowledge")
+    chunks = relationship("KnowledgeChunk", back_populates="knowledge", cascade="all, delete-orphan")

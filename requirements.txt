@@ -41,5 +41,10 @@ Pillow==11.1.0               # Image processing
 pandas==2.2.3                # Data processing
 matplotlib==3.9.0            # Excel to image conversion
 
+# RAG / Document Parsing
+fastembed>=0.8.0             # Local embeddings
+pgvector>=0.4.0              # SQLAlchemy pgvector support
+liteparse>=0.1.0             # Local document parsing with OCR/layout metadata
+
 # MCP (Model Context Protocol)
 mcp>=1.0.0                   # MCP client for external tool integration

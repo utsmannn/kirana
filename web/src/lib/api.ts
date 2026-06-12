@@ -432,8 +432,8 @@ export function deleteKnowledge(id: string, token?: string): Promise<void> {
 
 export function uploadKnowledgeFile(
 	file: File,
-	token?: string,
-	title?: string
+	title?: string,
+	token?: string
 ): Promise<KnowledgeItem> {
 	const formData = new FormData();
 	formData.append('file', file);

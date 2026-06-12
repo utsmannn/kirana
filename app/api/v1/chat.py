@@ -71,15 +71,19 @@ async def verify_chat_auth(
 
     Returns (auth_value, is_embed)
     """
+    from app.api.v1.admin import verify_admin_token
     from app.models.channel import Channel
 
     # Try API key first
     if token:
         if token.credentials == settings.KIRANA_API_KEY:
             return (token.credentials, False)
+        # Also accept admin token (from admin panel login)
+        if verify_admin_token(token.credentials):
+            return (token.credentials, False)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key",
+            detail="Invalid API key or admin token",
         )
 
     # Try embed token
@@ -279,12 +283,15 @@ async def chat_websocket(
       {"type": "stream_end"}
       {"type": "error", "message": "..."}
     """
+    from app.api.v1.admin import verify_admin_token
     from app.models.channel import Channel
 
     # Verify authentication
     is_embed = False
     if token and token == settings.KIRANA_API_KEY:
         pass  # Valid API key
+    elif token and verify_admin_token(token):
+        pass  # Valid admin token
     elif embed_token:
         # Verify embed token
         async for db in get_db():

@@ -52,6 +52,22 @@ class Settings(BaseSettings):
     # Google Fonts API (for brand style matching)
     GOOGLE_FONTS_API_KEY: Optional[str] = None
 
+    # RAG / Embeddings
+    RAG_ENABLED: bool = True
+    RAG_EMBED_MODEL: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    RAG_EMBED_DIM: int = 384
+    RAG_EMBED_BATCH_SIZE: int = 32
+    RAG_CHUNK_MAX_TOKENS: int = 800
+    RAG_CHUNK_OVERLAP_TOKENS: int = 120
+    RAG_TOP_K: int = 10
+    RAG_MAX_CONTEXT_CHARS: int = 12000
+
+    # LiteParse document parsing
+    LITEPARSE_ENABLED: bool = True
+    LITEPARSE_OCR_LANGUAGE: str = "ind"
+    LITEPARSE_MAX_PAGES: int = 1000
+    LITEPARSE_DPI: int = 150
+
     # Rate Limiting
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_REQUESTS_PER_MINUTE: int = 60
