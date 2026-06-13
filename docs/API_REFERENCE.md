@@ -643,18 +643,19 @@ Upload a file for RAG processing. Multipart form data.
 **Request:** `multipart/form-data`
 - `file`: The file (required)
 - `title`: Display title (optional, defaults to filename)
-- `content_type`: Override content type (optional)
-- `source_url`: Source URL (optional)
-- `metadata`: JSON string (optional)
 
-**Processing pipeline:**
-1. File saved to `UPLOAD_DIR/knowledge/<uuid>_<filename>`
+**This endpoint is fire-and-forget.** It returns immediately with `processing_status: "processing"`. Heavy work (parsing, chunking, embedding, indexing) runs in the background. Poll `GET /v1/knowledge/{id}` until `processing_status` becomes `"ready"` or `"failed"`.
+
+**Processing pipeline (runs in background):**
+1. File saved to `UPLOAD_DIR/knowledge/<uuid>_<ext>`
 2. **LiteParse** (for PDF, DOCX): Smart OCR parsing with page/bbox metadata
 3. Fallback to **FileProcessor** or **Vision API** if LiteParse fails
-4. Text stored in `Knowledge.content`
-5. **Chunking** (tiktoken cl100k_base, 800 tokens, 120 overlap)
-6. **Embedding** (FastEmbed, 384-dim, batch size 32)
-7. **pgvector insert** with HNSW index
+4. Optional AI analysis/summarization via configured LLM
+5. Text stored in `Knowledge.content`
+6. **Chunking** (tiktoken cl100k_base, 800 tokens, 120 overlap)
+7. **Embedding** (FastEmbed, 384-dim, batch size 32)
+8. **pgvector insert** with HNSW index
+9. Status updated to `"ready"` — document is now queryable via RAG
 
 **Supported formats:**
 
@@ -667,30 +668,76 @@ Upload a file for RAG processing. Multipart form data.
 | Text/CSV/Markdown | `.txt`, `.csv`, `.md`, `.json` | Direct | No parsing needed |
 | Images | `.png`, `.jpg`, `.jpeg` | Vision API | OCR + description |
 
-**Response `200`:**
+**Response `201` (immediate — processing not yet complete):**
 ```json
 {
   "id": "550e8400-...",
   "title": "handbook.pdf",
-  "content": "Full extracted text...",
-  "content_type": "application/pdf",
+  "content": "",
+  "content_type": "pdf",
   "source_type": "upload",
   "file_path": "/app/uploads/knowledge/abc123_handbook.pdf",
   "file_name": "handbook.pdf",
   "file_size": 1024000,
+  "mime_type": "application/pdf",
   "is_active": true,
-  "chunk_count": 15,
-  "extra_metadata": {
-    "parser": "liteparse",
-    "parsing_status": "success",
-    "ocr_language": "ind",
-    "pages_parsed": 42
+  "processing_status": "processing",
+  "metadata": {
+    "original_filename": "handbook.pdf",
+    "mime_type": "application/pdf",
+    "file_size": 1024000
   },
+  "has_file": true,
   "created_at": "2025-01-01T00:00:00"
 }
 ```
 
-**Errors:** `400` — File too large or unsupported type. `500` — Parsing/indexing failure.
+**Response `200` from `GET /v1/knowledge/{id}` after processing completes:**
+```json
+{
+  "id": "550e8400-...",
+  "title": "handbook.pdf",
+  "content": "## Summary\nThis handbook covers...\n\n---\n\n## Original Document\n\nFull extracted text...",
+  "content_type": "pdf",
+  "source_type": "upload",
+  "file_path": "/app/uploads/knowledge/abc123_handbook.pdf",
+  "file_name": "handbook.pdf",
+  "file_size": 1024000,
+  "mime_type": "application/pdf",
+  "is_active": true,
+  "processing_status": "ready",
+  "metadata": {
+    "analysis_method": "liteparse_ai_analyze",
+    "analysis_success": true,
+    "parser": "liteparse",
+    "pages": 42,
+    "extracted_length": 45210,
+    "original_filename": "handbook.pdf"
+  },
+  "has_file": true,
+  "created_at": "2025-01-01T00:00:00"
+}
+```
+
+**Polling pattern (recommended):**
+```
+POST /v1/knowledge/upload  →  201 { processing_status: "processing" }
+loop:
+  GET /v1/knowledge/{id}   →  check processing_status
+  if "ready"   → done, content + chunks available
+  if "failed"  → check metadata.processing_error
+  if "processing" → wait 2-3s, poll again
+```
+
+**Processing status values:**
+
+| Status | Meaning | What to do |
+|--------|---------|------------|
+| `"processing"` | Background worker is parsing/indexing | Poll again in 2-3 seconds |
+| `"ready"` | Document is fully indexed | Chunks are queryable via RAG |
+| `"failed"` | Processing error | Read `metadata.processing_error` for the failure reason |
+
+**Errors:** `400` — File too large (max 50MB) or unsupported type.
 
 #### `POST /v1/knowledge/scrape-web`
 Scrape a single URL into knowledge.
@@ -916,9 +963,10 @@ Usage statistics endpoint. Returns token usage, request counts, etc.
 ### Flow 2: Knowledge → RAG → Chat
 
 ```
-1. POST /v1/knowledge/upload    → upload document (parse → chunk → embed → store)
-2. POST /v1/chat/send           → ask question with channel_id (RAG automatically injects relevant chunks)
-3. Response includes [S1], [S2] citations
+1. POST /v1/knowledge/upload     → returns immediately (201, processing_status: "processing")
+2. GET  /v1/knowledge/{id}       → poll until processing_status is "ready"
+3. POST /v1/chat/send            → ask question with channel_id (RAG automatically injects relevant chunks)
+4. Response includes [S1], [S2] citations
 ```
 
 ### Flow 3: Admin Setup
@@ -1018,7 +1066,7 @@ When `RATE_LIMIT_ENABLED=true`, requests are limited per client IP:
 
 ## Idempotency
 
-- **Knowledge creation:** Not idempotent. Repeated `POST /v1/knowledge/upload` with the same file creates duplicate knowledge items.
+- **Knowledge upload:** `POST /v1/knowledge/upload` is **fire-and-forget** — returns `201` with `processing_status: "processing"`. Heavy work runs async. Poll `GET /v1/knowledge/{id}` for completion. Repeated uploads of the same file create duplicate items.
 - **Knowledge updates:** `PATCH` triggers re-indexing each time (delete old chunks + re-chunk + re-embed). Avoid unnecessary updates.
 - **Client registration:** `POST /v1/clients/` is idempotent by email — returns `400` if email already registered.
 - **Channel/provider CRUD:** Standard REST semantics. `PUT` not supported; use `PATCH` for partial updates.

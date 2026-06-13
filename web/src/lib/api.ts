@@ -407,6 +407,8 @@ export interface KnowledgeItem {
 	file_size?: number;
 	mime_type?: string;
 	has_file?: boolean;
+	// Backend metadata (serialization_alias from extra_metadata)
+	metadata?: Record<string, unknown>;
 	[key: string]: unknown;
 }
 

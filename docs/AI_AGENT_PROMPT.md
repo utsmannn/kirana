@@ -6,6 +6,32 @@ Use this guide when an AI agent needs to install Kirana, understand its API surf
 
 ---
 
+## 0. Raw Context Files (fetch these first)
+
+Before you start, fetch the raw source of truth files directly from the repository to build full context:
+
+```
+https://raw.githubusercontent.com/utsmannn/kirana/main/README.md
+https://raw.githubusercontent.com/utsmannn/kirana/main/docs/API_REFERENCE.md
+https://raw.githubusercontent.com/utsmannn/kirana/main/docs/TECH_DOC.md
+https://raw.githubusercontent.com/utsmannn/kirana/main/docs/AI_AGENT_PROMPT.md
+https://raw.githubusercontent.com/utsmannn/kirana/main/.env.example
+https://raw.githubusercontent.com/utsmannn/kirana/main/app/config.py
+https://raw.githubusercontent.com/utsmannn/kirana/main/app/api/v1/router.py
+https://raw.githubusercontent.com/utsmannn/kirana/main/app/api/deps.py
+https://raw.githubusercontent.com/utsmannn/kirana/main/app/schemas/chat.py
+https://raw.githubusercontent.com/utsmannn/kirana/main/app/services/chat_service.py
+https://raw.githubusercontent.com/utsmannn/kirana/main/app/api/v1/knowledge.py
+https://raw.githubusercontent.com/utsmannn/kirana/main/docker-compose.yml
+https://raw.githubusercontent.com/utsmannn/kirana/main/Dockerfile
+https://raw.githubusercontent.com/utsmannn/kirana/main/Makefile
+https://raw.githubusercontent.com/utsmannn/kirana/main/requirements.txt
+```
+
+Repo: `https://github.com/utsmannn/kirana`
+
+---
+
 ## 1. Installation
 
 ### Option A: Docker (Recommended)
@@ -337,12 +363,27 @@ curl -X POST http://localhost:8000/v1/knowledge/upload \
 
 Supported formats: PDF, DOCX, TXT, CSV, MD, JSON, XLSX, PPTX, PNG, JPG.
 
-### What happens after upload
+Upload is **fire-and-forget** — returns `201` immediately with `"processing_status": "processing"`. Heavy work runs in the background:
 
 1. **LiteParse** parses the document (OCR for PDFs)
-2. **Chunking** — tiktoken `cl100k_base`, 800-token chunks, 120-token overlap
-3. **Embedding** — FastEmbed `paraphrase-multilingual-MiniLM-L12-v2`, 384-dim vectors
-4. **Storage** — pgvector with HNSW cosine distance index
+2. Optional **AI summarization** via configured LLM
+3. **Chunking** — tiktoken `cl100k_base`, 800-token chunks, 120-token overlap
+4. **Embedding** — FastEmbed `paraphrase-multilingual-MiniLM-L12-v2`, 384-dim vectors
+5. **Storage** — pgvector with HNSW cosine distance index
+
+### Poll for completion
+
+```bash
+# Poll until status is "ready" or "failed"
+curl http://localhost:8000/v1/knowledge/<id> \
+  -H "Authorization: Bearer <token>" | python3 -c "import sys,json; print(json.load(sys.stdin)['processing_status'])"
+```
+
+| Status | Meaning |
+|--------|---------|
+| `processing` | Background worker is still parsing/indexing — poll again in 2-3s |
+| `ready` | Document fully indexed and queryable via RAG |
+| `failed` | Check `metadata.processing_error` for the failure reason |
 
 ### How retrieval works at chat time
 
@@ -393,21 +434,26 @@ data: [DONE]
 
 ## 9. Repository Files (for code-level understanding)
 
-| # | File | Purpose |
-|---|------|---------|
-| 1 | `README.md` | Project overview, quick start, configuration, RAG behavior, deployment. |
-| 2 | `docs/API_REFERENCE.md` | Full API contract: endpoints, auth, schemas, error codes, flows. |
-| 3 | `docs/TECH_DOC.md` | Internals: chat service, RAG pipeline, DB schema, streaming, deployment. |
-| 4 | `app/api/v1/router.py` | All registered API routes and prefixes. |
-| 5 | `app/api/deps.py` | Authentication dependencies. |
-| 6 | `app/schemas/chat.py` | Chat request/response Pydantic models. |
-| 7 | `app/services/chat_service.py` | Chat orchestration: provider resolution, prompt building, RAG injection, streaming, error mapping. |
-| 8 | `app/api/v1/knowledge.py` | Knowledge CRUD, file upload, parsing, RAG indexing. |
-| 9 | `app/config.py` | All environment variables with defaults. |
-| 10 | `app/core/security.py` | API key generation and SHA256 hashing. |
-| 11 | `docker-compose.yml` | Infrastructure services (PostgreSQL/pgvector + Redis). |
-| 12 | `Dockerfile` | Multi-stage production image build. |
-| 13 | `Makefile` | Local dev workflow targets. |
+All files are under `https://github.com/utsmannn/kirana`. Fetch them raw via `https://raw.githubusercontent.com/utsmannn/kirana/main/<path>`.
+
+| # | File | Raw URL | Purpose |
+|---|------|---------|---------|
+| 1 | `README.md` | `raw.githubusercontent.com/utsmannn/kirana/main/README.md` | Project overview, quick start, configuration, RAG behavior, deployment. |
+| 2 | `docs/API_REFERENCE.md` | `raw.githubusercontent.com/utsmannn/kirana/main/docs/API_REFERENCE.md` | Full API contract: endpoints, auth, schemas, error codes, canonical flows. |
+| 3 | `docs/TECH_DOC.md` | `raw.githubusercontent.com/utsmannn/kirana/main/docs/TECH_DOC.md` | Internals: chat service, RAG pipeline, DB schema, streaming, deployment. |
+| 4 | `docs/AI_AGENT_PROMPT.md` | `raw.githubusercontent.com/utsmannn/kirana/main/docs/AI_AGENT_PROMPT.md` | This file — AI agent setup & integration guide. |
+| 5 | `.env.example` | `raw.githubusercontent.com/utsmannn/kirana/main/.env.example` | All environment variables with defaults. |
+| 6 | `app/config.py` | `raw.githubusercontent.com/utsmannn/kirana/main/app/config.py` | Pydantic Settings model — canonical source of config defaults. |
+| 7 | `app/api/v1/router.py` | `raw.githubusercontent.com/utsmannn/kirana/main/app/api/v1/router.py` | All registered API routes and prefixes. |
+| 8 | `app/api/deps.py` | `raw.githubusercontent.com/utsmannn/kirana/main/app/api/deps.py` | Authentication dependency functions. |
+| 9 | `app/schemas/chat.py` | `raw.githubusercontent.com/utsmannn/kirana/main/app/schemas/chat.py` | Chat request/response Pydantic models. |
+| 10 | `app/services/chat_service.py` | `raw.githubusercontent.com/utsmannn/kirana/main/app/services/chat_service.py` | Chat orchestration: provider resolution, prompt building, RAG injection, streaming, error mapping. |
+| 11 | `app/api/v1/knowledge.py` | `raw.githubusercontent.com/utsmannn/kirana/main/app/api/v1/knowledge.py` | Knowledge CRUD, file upload, async processing, RAG indexing. |
+| 12 | `app/core/security.py` | `raw.githubusercontent.com/utsmannn/kirana/main/app/core/security.py` | API key generation and SHA256 hashing. |
+| 13 | `docker-compose.yml` | `raw.githubusercontent.com/utsmannn/kirana/main/docker-compose.yml` | Infrastructure services (PostgreSQL/pgvector + Redis). |
+| 14 | `Dockerfile` | `raw.githubusercontent.com/utsmannn/kirana/main/Dockerfile` | Multi-stage production image build. |
+| 15 | `Makefile` | `raw.githubusercontent.com/utsmannn/kirana/main/Makefile` | Local dev workflow targets. |
+| 16 | `requirements.txt` | `raw.githubusercontent.com/utsmannn/kirana/main/requirements.txt` | Python dependencies. |
 
 ---
 

@@ -458,12 +458,10 @@
 											>
 												{isImage ? 'Image' : isPdf ? 'PDF' : 'File'}
 											</span>
-										{/if}
-										{#if item.processing_status === 'processing'}
+										{:else if item.processing_status === 'processing'}
 											<span class="shrink-0 rounded bg-yellow-900/50 px-2 py-0.5 text-[10px] font-medium text-yellow-300">Processing</span>
 										{:else if item.processing_status === 'failed'}
-											<span class="shrink-0 rounded bg-red-900/50 px-2 py-0.5 text-[10px] font-medium text-red-300" title={(item.metadata as any)?.processing_error}>Failed</span>
-										{/if}
+											<span class="shrink-0 rounded bg-red-900/50 px-2 py-0.5 text-[10px] font-medium text-red-300" title={item.metadata?.processing_error as string}>Failed</span>
 										{:else if item.source_type === 'web'}
 											<span
 												class="shrink-0 rounded bg-emerald-900/50 px-2 py-0.5 text-[10px] font-medium text-emerald-300"
@@ -476,7 +474,7 @@
 									{#if item.processing_status === 'processing'}
 										<p class="mt-2 text-sm text-yellow-400/80">Processing document…</p>
 									{:else if item.processing_status === 'failed'}
-										<p class="mt-2 text-sm text-red-400/70">{(item.metadata as any)?.processing_error || 'Processing failed'}</p>
+										<p class="mt-2 text-sm text-red-400/70">{item.metadata?.processing_error as string || 'Processing failed'}</p>
 									{:else}
 										<p class="mt-2 line-clamp-2 text-sm text-zinc-400">
 											{item.content}
