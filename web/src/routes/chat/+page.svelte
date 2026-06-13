@@ -22,6 +22,7 @@
 	interface DisplayMessage {
 		role: 'user' | 'assistant';
 		content: string;
+		isError?: boolean;
 	}
 
 	// UUID generator for stream_id
@@ -352,7 +353,8 @@
 					messages: apiMessages,
 					stream: true,
 					stream_id: streamId,
-					session_id: activeSessionId ?? undefined
+					session_id: activeSessionId ?? undefined,
+					channel_id: selectedChannelId || undefined
 				}, undefined, (sid: string) => {
 					// Update resume state with stream_id
 					pendingResume = {
@@ -374,18 +376,19 @@
 					model: model || 'default',
 					messages: apiMessages,
 					stream: false,
-					session_id: activeSessionId ?? undefined
+					session_id: activeSessionId ?? undefined,
+					channel_id: selectedChannelId || undefined
 				}, undefined);
 
 				const content = response.choices?.[0]?.message?.content || '';
 				messages[assistantIdx] = { role: 'assistant', content };
 			}
-		} catch (err) {
-			if (err instanceof ApiError) {
-				messages[assistantIdx] = { role: 'assistant', content: `Error: ${err.message}` };
-			} else {
-				messages[assistantIdx] = { role: 'assistant', content: 'Error: Failed to get response' };
-			}
+			} catch (err) {
+				if (err instanceof ApiError) {
+					messages[assistantIdx] = { role: 'assistant', content: err.message, isError: true };
+				} else {
+					messages[assistantIdx] = { role: 'assistant', content: 'Failed to get response', isError: true };
+				}
 		} finally {
 			streaming = false;
 			pendingResume = null;
@@ -623,7 +626,9 @@
 									class="max-w-[80%] rounded-2xl px-4 py-3 text-sm leading-relaxed
 										{message.role === 'user'
 										? 'bg-indigo-600 text-white'
-										: 'bg-zinc-800 text-zinc-200'}"
+										: message.isError
+											? 'border border-red-500/40 bg-red-950/40 text-red-100'
+											: 'bg-zinc-800 text-zinc-200'}"
 								>
 									{#if message.role === 'assistant' && !message.content && streaming && i === messages.length - 1}
 										<div class="flex items-center gap-2">
@@ -649,6 +654,9 @@
 										</div>
 									{:else}
 										{#if message.role === 'assistant'}
+											{#if message.isError}
+												<div class="mb-1 text-xs font-semibold uppercase tracking-wide text-red-300">Provider error</div>
+											{/if}
 											<div class="prose prose-invert prose-sm max-w-none markdown-content">
 												<!-- svelte-ignore svelte_dom_stringify -->
 												{@html (window as any).marked ? (window as any).marked.parse(message.content) : message.content}

@@ -152,7 +152,7 @@ async def verify_chat_auth(
     )
 
 
-@router.post("/completions")
+@router.post("/send")
 async def create_chat_completion(
     request: ChatCompletionRequest,
     auth_info: tuple[str, bool] = Depends(verify_chat_auth),
@@ -212,6 +212,15 @@ async def create_chat_completion(
                             except json.JSONDecodeError:
                                 pass
                         yield chunk
+                except HTTPException as e:
+                    detail = e.detail if isinstance(e.detail, dict) else {"message": str(e.detail)}
+                    detail["status_code"] = e.status_code
+                    yield f"data: {json.dumps({'error': detail})}\n\n"
+                    yield "data: [DONE]\n\n"
+                except Exception:
+                    logger.exception("[CHAT STREAM ERROR] IP=%s", client_ip)
+                    yield f"data: {json.dumps({'error': {'code': 'chat_stream_error', 'message': 'An error occurred while streaming the chat response.'}})}\n\n"
+                    yield "data: [DONE]\n\n"
                 finally:
                     try:
                         await stream_buffer.mark_done(stream_id)

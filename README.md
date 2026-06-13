@@ -6,6 +6,12 @@ Deploy once. Use everywhere — REST API, WebSocket, embeddable chat widget, or 
 
 ---
 
+```
+Build me a chatbot app with RAG and knowledge management using Kirana, start with https://raw.githubusercontent.com/utsmannn/kirana/main/docs/AI_AGENT_PROMPT.md
+```
+
+---
+
 ## What Kirana Does
 
 ```mermaid
@@ -153,12 +159,17 @@ curl -X POST http://localhost:8000/v1/admin/login \
   -d '{"password":"admin"}'
 # → {"token": "abc123..."}
 
-# Chat
-curl -X POST http://localhost:8000/v1/chat/completions \
+# List channels and pick one ID
+curl http://localhost:8000/v1/channels/ \
+  -H "Authorization: Bearer kirana-default-api-key-change-me"
+
+# Chat (pass channel_id so Kirana uses the intended provider/personality)
+curl -X POST http://localhost:8000/v1/chat/send \
   -H "Authorization: Bearer kirana-default-api-key-change-me" \
   -H "Content-Type: application/json" \
   -d '{
     "messages": [{"role": "user", "content": "Hello!"}],
+    "channel_id": "<channel-id>",
     "stream": false
   }'
 ```
@@ -225,7 +236,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A[POST /v1/chat/completions] --> B[1. Authenticate<br/>API key / admin token / embed token / client key]
+    A[POST /v1/chat/send] --> B[1. Authenticate<br/>API key / admin token / embed token / client key]
     B --> C[2. Resolve Channel<br/>Get provider credentials, personality, context guard]
     C --> D[3. Build System Prompt<br/>Personality + context guard + tool definitions]
     D --> E[4. Retrieve RAG Context<br/>Embed query → pgvector search → format citations]
@@ -280,11 +291,11 @@ curl http://localhost:8000/v1/clients/me \
 
 ### Chat
 
-**`POST /v1/chat/completions`** — OpenAI-compatible chat endpoint.
+**`POST /v1/chat/send`** — Send a message to the AI. Uses OpenAI-compatible request/response format.
 
 ```bash
 # Non-streaming
-curl -X POST http://localhost:8000/v1/chat/completions \
+curl -X POST http://localhost:8000/v1/chat/send \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{
@@ -295,7 +306,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
   }'
 
 # Streaming (SSE)
-curl -N -X POST http://localhost:8000/v1/chat/completions \
+curl -N -X POST http://localhost:8000/v1/chat/send \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{
@@ -580,7 +591,7 @@ TOKEN = "kirana-default-api-key-change-me"
 
 def chat(message: str, channel_id: str = None, session_id: str = None) -> str:
     resp = requests.post(
-        f"{KIRANA}/chat/completions",
+        f"{KIRANA}/chat/send",
         headers={"Authorization": f"Bearer {TOKEN}"},
         json={
             "messages": [{"role": "user", "content": message}],
@@ -592,17 +603,23 @@ def chat(message: str, channel_id: str = None, session_id: str = None) -> str:
     return resp.json()["choices"][0]["message"]["content"]
 
 # Usage
-print(chat("What is RAG?"))
+channels = requests.get(
+    f"{KIRANA}/channels/",
+    headers={"Authorization": f"Bearer {TOKEN}"},
+).json()
+channel_id = (channels.get("default_channel") or channels["channels"][0])["id"]
+
+print(chat("What is RAG?", channel_id=channel_id))
 
 # With session persistence
 session = requests.post(
     f"{KIRANA}/sessions/",
     headers={"Authorization": f"Bearer {TOKEN}"},
-    json={"title": "My Chat"},
+    json={"name": "My Chat", "channel_id": channel_id},
 ).json()
 
-print(chat("My name is Bob", session_id=session["id"]))
-print(chat("What is my name?", session_id=session["id"]))
+print(chat("My name is Bob", channel_id=channel_id, session_id=session["id"]))
+print(chat("What is my name?", channel_id=channel_id, session_id=session["id"]))
 # → "Your name is Bob."
 ```
 
@@ -612,8 +629,8 @@ print(chat("What is my name?", session_id=session["id"]))
 const KIRANA = "http://localhost:8000/v1";
 const TOKEN = "kirana-default-api-key-change-me";
 
-async function chat(message: string, sessionId?: string): Promise<string> {
-  const resp = await fetch(`${KIRANA}/chat/completions`, {
+async function chat(message: string, channelId: string, sessionId?: string): Promise<string> {
+  const resp = await fetch(`${KIRANA}/chat/send`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${TOKEN}`,
@@ -621,6 +638,7 @@ async function chat(message: string, sessionId?: string): Promise<string> {
     },
     body: JSON.stringify({
       messages: [{ role: "user", content: message }],
+      channel_id: channelId,
       session_id: sessionId,
       stream: false,
     }),
@@ -630,8 +648,8 @@ async function chat(message: string, sessionId?: string): Promise<string> {
 }
 
 // Streaming
-async function* chatStream(message: string) {
-  const resp = await fetch(`${KIRANA}/chat/completions`, {
+async function* chatStream(message: string, channelId: string) {
+  const resp = await fetch(`${KIRANA}/chat/send`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${TOKEN}`,
@@ -639,6 +657,7 @@ async function* chatStream(message: string) {
     },
     body: JSON.stringify({
       messages: [{ role: "user", content: message }],
+      channel_id: channelId,
       stream: true,
     }),
   });
@@ -670,10 +689,10 @@ async function* chatStream(message: string) {
 
 ```bash
 # Chat
-curl -X POST http://localhost:8000/v1/chat/completions \
+curl -X POST http://localhost:8000/v1/chat/send \
   -H "Authorization: Bearer kirana-default-api-key-change-me" \
   -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"Hi"}],"stream":false}'
+  -d '{"messages":[{"role":"user","content":"Hi"}],"channel_id":"<channel-id>","stream":false}'
 
 # Create knowledge
 curl -X POST http://localhost:8000/v1/knowledge/ \

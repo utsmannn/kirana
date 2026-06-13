@@ -25,6 +25,28 @@ function handleUnauthorized() {
 	goto('/panel/login');
 }
 
+function getErrorMessage(body: unknown, fallback: string): string {
+	if (typeof body === 'object' && body !== null) {
+		if ('error' in body) {
+			const error = (body as { error: unknown }).error;
+			if (typeof error === 'object' && error !== null && 'message' in error) {
+				return String((error as { message: unknown }).message);
+			}
+			return String(error);
+		}
+
+		if ('detail' in body) {
+			const detail = (body as { detail: unknown }).detail;
+			if (typeof detail === 'object' && detail !== null && 'message' in detail) {
+				return String((detail as { message: unknown }).message);
+			}
+			return String(detail);
+		}
+	}
+
+	return fallback;
+}
+
 async function request<T>(
 	path: string,
 	options: RequestInit & { token?: string } = {}
@@ -60,21 +82,7 @@ async function request<T>(
 			body = await response.text();
 		}
 
-		// Handle custom error format: {"error": {"message": "..."}}
-		// Or standard format: {"detail": "..."}
-		let message: string;
-		if (typeof body === 'object' && body !== null) {
-			if ('error' in body && typeof (body as { error: unknown }).error === 'object') {
-				const errorObj = (body as { error: { message?: string } }).error;
-				message = errorObj.message || `Request failed with status ${response.status}`;
-			} else if ('detail' in body) {
-				message = String((body as { detail: string }).detail);
-			} else {
-				message = `Request failed with status ${response.status}`;
-			}
-		} else {
-			message = `Request failed with status ${response.status}`;
-		}
+		const message = getErrorMessage(body, `Request failed with status ${response.status}`);
 
 		throw new ApiError(response.status, message, body);
 	}
@@ -195,6 +203,7 @@ export interface ChatRequest {
 	messages: ChatMessage[];
 	stream?: boolean;
 	session_id?: string;
+	channel_id?: string;
 	stream_id?: string;
 }
 
@@ -214,7 +223,7 @@ export async function* streamChat(
 		Authorization: `Bearer ${authToken}`
 	};
 
-	const response = await fetch(`${API_BASE}/chat/completions`, {
+	const response = await fetch(`${API_BASE}/chat/send`, {
 		method: 'POST',
 		headers,
 		body: JSON.stringify({ ...data, stream: true })
@@ -232,10 +241,7 @@ export async function* streamChat(
 		} catch {
 			body = await response.text();
 		}
-		const message =
-			typeof body === 'object' && body !== null && 'detail' in body
-				? String((body as { detail: string }).detail)
-				: `Chat request failed with status ${response.status}`;
+		const message = getErrorMessage(body, `Chat request failed with status ${response.status}`);
 		throw new ApiError(response.status, message, body);
 	}
 
@@ -259,20 +265,31 @@ export async function* streamChat(
 			const payload = trimmed.slice(6);
 			if (payload === '[DONE]') return;
 
-			try {
-				const parsed = JSON.parse(payload);
-				// Handle stream_id event
-				if (parsed.stream_id) {
-					if (onStreamId) onStreamId(parsed.stream_id);
+				let parsed: unknown;
+				try {
+					parsed = JSON.parse(payload);
+				} catch {
+					// skip unparseable chunks
 					continue;
 				}
-				const content = parsed.choices?.[0]?.delta?.content;
+
+				if (typeof parsed !== 'object' || parsed === null) continue;
+
+				if ('error' in parsed) {
+					const error = (parsed as { error: { status_code?: number } }).error;
+					throw new ApiError(error.status_code ?? 502, getErrorMessage(parsed, 'AI provider error'), parsed);
+				}
+
+				// Handle stream_id event
+				if ('stream_id' in parsed) {
+					if (onStreamId) onStreamId(String((parsed as { stream_id: unknown }).stream_id));
+					continue;
+				}
+
+				const content = (parsed as { choices?: { delta?: { content?: string } }[] }).choices?.[0]?.delta?.content;
 				if (content) {
 					yield content;
 				}
-			} catch {
-				// skip unparseable chunks
-			}
 		}
 	}
 }
@@ -281,7 +298,7 @@ export function sendChat(
 	data: ChatRequest,
 	token?: string
 ): Promise<{ choices: { message: ChatMessage }[] }> {
-	return request('/chat/completions', {
+	return request('/chat/send', {
 		method: 'POST',
 		token,
 		body: JSON.stringify({ ...data, stream: false })

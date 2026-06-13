@@ -2,7 +2,8 @@
 
 **Comprehensive developer documentation.** Covers architecture internals, RAG pipeline, database schema, deployment, and advanced configuration.
 
-> For getting started and API overview, see [README.md](../README.md).
+> For getting started and architecture overview, see [README.md](../README.md).
+> For the complete API contract (endpoints, auth, schemas), see [API_REFERENCE.md](API_REFERENCE.md).
 
 ---
 
@@ -500,25 +501,31 @@ class ChatService:
 ### 5.2 Provider Resolution
 
 ```python
-def _resolve_provider(self, channel, db):
-    # Priority:
-    # 1. Channel's provider_id → ProviderCredential row
-    # 2. .env OPENAI_API_KEY / OPENAI_BASE_URL (fallback)
-    
-    if channel and channel.provider_id:
+def _resolve_provider(request, channel, db):
+    # Preferred path: explicit request.channel_id → Channel.provider_id → active ProviderCredential
+    if channel:
         provider = await db.get(ProviderCredential, channel.provider_id)
-        if provider and provider.is_active:
-            return AsyncOpenAI(
-                api_key=provider.api_key,
-                base_url=provider.base_url,
-            ), provider.model
-    
-    # Fallback to .env
+        if not provider or not provider.is_active:
+            raise provider_config_error(
+                "The selected channel's AI provider is inactive or no longer exists."
+            )
+        return AsyncOpenAI(
+            api_key=provider.api_key,
+            base_url=provider.base_url,
+        ), provider.model
+
+    # Only used when no channel/session was provided/resolved.
+    # This is a fallback for bare API calls, not for misconfigured channels.
+    if not settings.OPENAI_API_KEY:
+        raise provider_config_error("No AI provider API key is configured.")
+
     return AsyncOpenAI(
         api_key=settings.OPENAI_API_KEY,
         base_url=settings.OPENAI_BASE_URL,
     ), settings.DEFAULT_MODEL
 ```
+
+Kirana intentionally does **not** fallback to `.env` when a selected channel has an inactive or missing provider. That would hide configuration errors and may route user chats to the wrong model. Provider/API failures are mapped to structured `provider_config_error` or `provider_error` responses.
 
 ### 5.3 System Prompt Assembly
 
@@ -869,8 +876,10 @@ Usage stats are available at `GET /v1/usage`.
 | **404** | Resource not found |
 | **409** | Conflict (e.g., duplicate email, duplicate channel) |
 | **422** | Validation error (Pydantic) |
-| **429** | Rate limit exceeded |
+| **429** | Rate limit exceeded (Kirana or upstream provider) |
 | **500** | Internal server error |
+| **502** | AI provider/configuration error |
+| **504** | AI provider timeout or connection failure |
 
 ### 10.2 Error Response Format
 
@@ -893,11 +902,33 @@ Or for validation errors:
 }
 ```
 
+Provider/chat failures use structured details:
+```json
+{
+  "detail": {
+    "code": "provider_error",
+    "message": "AI provider authentication failed. Check the provider API key.",
+    "provider_error_type": "AuthenticationError",
+    "provider_message": "...",
+    "model": "gpt-4o-mini"
+  }
+}
+```
+
+Streaming chat sends provider errors as SSE payloads:
+```text
+data: {"error":{"code":"provider_error","message":"AI provider returned an error.","status_code":502}}
+
+data: [DONE]
+```
+
 ### 10.3 Graceful Degradation
 
 - **LiteParse fails** → falls back to `FileProcessor` or direct text read
 - **Vision API fails** → returns extracted text only (no AI analysis)
-- **Embedding model fails to load** → RAG disabled, chat works without knowledge
+- **Embedding model fails to load** → RAG retrieval is skipped, chat can continue without knowledge context
+- **Provider misconfigured** → chat returns structured `provider_config_error`; it does not silently fallback to another provider
+- **Provider API fails** → chat returns structured `provider_error` (`502`, `429`, or `504` depending on failure type)
 - **MCP server unavailable** → `analyze_image` returns error, doesn't crash
 
 ---

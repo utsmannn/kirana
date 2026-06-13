@@ -4,7 +4,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
-from openai import AsyncOpenAI
+from fastapi import HTTPException, status
+from openai import APIConnectionError, APIError, APITimeoutError, AuthenticationError, BadRequestError, RateLimitError, AsyncOpenAI
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -58,8 +59,10 @@ class ChatService:
                 "Always respond in the same language as the user."
             )
         else:
-            # Fallback to global settings (only when no context)
-            ai_name = getattr(settings, 'AI_NAME', 'Kirana')
+            # Fallback to personality name first, then global settings.
+            # This prevents chat from identifying as "Kirana" when a channel has
+            # a configured personality but does not define a custom system prompt.
+            ai_name = (channel.personality_name if channel else None) or getattr(settings, 'AI_NAME', 'Kirana')
             custom_prompt = getattr(settings, 'CUSTOM_SYSTEM_PROMPT', None)
 
             if custom_prompt:
@@ -94,6 +97,13 @@ class ChatService:
             for tool in user_tools:
                 prompt += f"- {tool.name}: {tool.description}\n"
             prompt += "\nUse the tools when they would help answer the user's question."
+
+        # Branding — always appended.
+        # Personality name overrides the default AI name.
+        # Channel context overrides the default developer/owner name.
+        ai_name = (channel.personality_name if channel else None) or "Kirana"
+        developer = (channel.context if channel and channel.context else "Kiat Koding")
+        prompt += f"\n\nYou are {ai_name}, developed by {developer}."
 
         return prompt
 
@@ -249,6 +259,46 @@ Always respond in the same language the user used in their query.
             kwargs["base_url"] = api_base
         return AsyncOpenAI(**kwargs)
 
+    def _raise_provider_error(self, error: Exception, model: str) -> None:
+        """Map OpenAI-compatible provider errors to clear HTTP errors."""
+        provider_message = str(error)
+        logger.warning(
+            "[PROVIDER ERROR] model=%s type=%s message=%s",
+            model,
+            error.__class__.__name__,
+            provider_message,
+        )
+
+        if isinstance(error, AuthenticationError):
+            status_code = status.HTTP_502_BAD_GATEWAY
+            message = "AI provider authentication failed. Check the provider API key."
+        elif isinstance(error, RateLimitError):
+            status_code = status.HTTP_429_TOO_MANY_REQUESTS
+            message = "AI provider rate limit exceeded. Please try again later."
+        elif isinstance(error, BadRequestError):
+            status_code = status.HTTP_502_BAD_GATEWAY
+            message = "AI provider rejected the request. Check the selected model and provider configuration."
+        elif isinstance(error, (APITimeoutError, APIConnectionError)):
+            status_code = status.HTTP_504_GATEWAY_TIMEOUT
+            message = "AI provider is unreachable or timed out. Check the provider base URL and network connection."
+        elif isinstance(error, APIError):
+            status_code = status.HTTP_502_BAD_GATEWAY
+            message = "AI provider returned an error. Please check the provider configuration or try again."
+        else:
+            status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+            message = "Unexpected error while calling the AI provider."
+
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "code": "provider_error",
+                "message": message,
+                "provider_error_type": error.__class__.__name__,
+                "provider_message": provider_message,
+                "model": model,
+            },
+        ) from error
+
     async def _prepare_completion(
         self,
         request: ChatCompletionRequest,
@@ -365,8 +415,29 @@ Always respond in the same language the user used in their query.
                 )
             else:
                 logger.warning(
-                    "[PROVIDER] Channel provider inactive/not found, falling back to .env"
+                    "[PROVIDER] Channel provider inactive/not found: channel_id=%s provider_id=%s",
+                    channel.id,
+                    channel.provider_id,
                 )
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail={
+                        "code": "provider_config_error",
+                        "message": "The selected channel's AI provider is inactive or no longer exists. Please update the channel provider configuration.",
+                        "channel_id": str(channel.id),
+                        "provider_id": str(channel.provider_id),
+                    },
+                )
+
+        if not api_key:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={
+                    "code": "provider_config_error",
+                    "message": "No AI provider API key is configured. Please configure a provider or set OPENAI_API_KEY.",
+                    "model": model,
+                },
+            )
 
         completion_kwargs: Dict[str, Any] = {
             "model": model,
@@ -439,7 +510,10 @@ Always respond in the same language the user used in their query.
         completion_kwargs, session, model, messages, client = await self._prepare_completion(request)
 
         start_time = time.monotonic()
-        response = await client.chat.completions.create(**completion_kwargs)
+        try:
+            response = await client.chat.completions.create(**completion_kwargs)
+        except Exception as e:
+            self._raise_provider_error(e, model)
         latency_ms = int((time.monotonic() - start_time) * 1000)
 
         message = response.choices[0].message
@@ -471,7 +545,10 @@ Always respond in the same language the user used in their query.
             completion_kwargs.pop("tool_choice", None)
 
             logger.info("[TOOL] Re-calling LLM with tool results")
-            final_response = await client.chat.completions.create(**completion_kwargs)
+            try:
+                final_response = await client.chat.completions.create(**completion_kwargs)
+            except Exception as e:
+                self._raise_provider_error(e, model)
             content = final_response.choices[0].message.content or ""
             usage = final_response.usage
             latency_ms = int((time.monotonic() - start_time) * 1000)
@@ -522,7 +599,10 @@ Always respond in the same language the user used in their query.
 
         start_time = time.monotonic()
 
-        response = await client.chat.completions.create(**completion_kwargs)
+        try:
+            response = await client.chat.completions.create(**completion_kwargs)
+        except Exception as e:
+            self._raise_provider_error(e, model)
 
         full_content = ""
         tool_calls_accum: Dict[int, Dict[str, Any]] = {}
@@ -581,7 +661,10 @@ Always respond in the same language the user used in their query.
             completion_kwargs.pop("tool_choice", None)
 
             logger.info("[TOOL STREAM] Streaming final answer with tool results")
-            final_response = await client.chat.completions.create(**completion_kwargs)
+            try:
+                final_response = await client.chat.completions.create(**completion_kwargs)
+            except Exception as e:
+                self._raise_provider_error(e, model)
 
             async for chunk in final_response:
                 chunk_content = chunk.choices[0].delta.content or ""
