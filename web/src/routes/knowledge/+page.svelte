@@ -23,6 +23,7 @@
 	let currentPage = $state(1);
 	let totalPages = $state(1);
 	let total = $state(0);
+	let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 	// Modal state
 	let modalOpen = $state(false);
@@ -68,7 +69,35 @@
 
 	onMount(() => {
 		loadItems();
+		return () => stopPolling();
 	});
+
+	function startPolling() {
+		stopPolling();
+		const hasProcessing = items.some(item => item.processing_status === 'processing');
+		if (!hasProcessing) return;
+		pollTimer = setInterval(async () => {
+			const processingIds = items.filter(i => i.processing_status === 'processing').map(i => i.id);
+			if (processingIds.length === 0) { stopPolling(); return; }
+			try {
+				const results = await Promise.all(processingIds.map(async id => {
+					const r = await fetch(`/v1/knowledge/${id}`, { headers: { Authorization: `Bearer ${adminToken.value}` } });
+					return r.ok ? r.json() as Promise<KnowledgeItem> : null;
+				}));
+				const updated = results.filter((u): u is KnowledgeItem => u !== null);
+				for (const u of updated) {
+					const idx = items.findIndex(i => i.id === u.id);
+					if (idx >= 0) items[idx] = { ...items[idx], ...u };
+				}
+				items = [...items];
+				startPolling(); // re-evaluate — stops when nothing left
+			} catch { /* ignore poll errors */ }
+		}, 3000);
+	}
+
+	function stopPolling() {
+		if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+	}
 
 	async function loadItems() {
 		if (!adminToken.value) {
@@ -86,6 +115,7 @@
 			items = result.items;
 			totalPages = result.pages;
 			total = result.total;
+			startPolling();
 		} catch (err) {
 			if (err instanceof ApiError) {
 				showToast(err.message, 'error');
@@ -162,7 +192,7 @@
 
 		try {
 			await uploadKnowledgeFile(selectedFile, formTitle.trim() || undefined);
-			showToast('File uploaded successfully', 'success');
+			showToast('File uploaded — processing in background…', 'success');
 			modalOpen = false;
 			selectedFile = null;
 			formTitle = '';
@@ -428,6 +458,12 @@
 											>
 												{isImage ? 'Image' : isPdf ? 'PDF' : 'File'}
 											</span>
+										{/if}
+										{#if item.processing_status === 'processing'}
+											<span class="shrink-0 rounded bg-yellow-900/50 px-2 py-0.5 text-[10px] font-medium text-yellow-300">Processing</span>
+										{:else if item.processing_status === 'failed'}
+											<span class="shrink-0 rounded bg-red-900/50 px-2 py-0.5 text-[10px] font-medium text-red-300" title={(item.metadata as any)?.processing_error}>Failed</span>
+										{/if}
 										{:else if item.source_type === 'web'}
 											<span
 												class="shrink-0 rounded bg-emerald-900/50 px-2 py-0.5 text-[10px] font-medium text-emerald-300"
@@ -437,9 +473,15 @@
 											</span>
 										{/if}
 									</div>
-									<p class="mt-2 line-clamp-2 text-sm text-zinc-400">
-										{item.content}
-									</p>
+									{#if item.processing_status === 'processing'}
+										<p class="mt-2 text-sm text-yellow-400/80">Processing document…</p>
+									{:else if item.processing_status === 'failed'}
+										<p class="mt-2 text-sm text-red-400/70">{(item.metadata as any)?.processing_error || 'Processing failed'}</p>
+									{:else}
+										<p class="mt-2 line-clamp-2 text-sm text-zinc-400">
+											{item.content}
+										</p>
+									{/if}
 									<div class="mt-2 flex items-center gap-3 text-xs text-zinc-600">
 										<span>Updated {new Date(item.updated_at).toLocaleDateString()}</span>
 										{#if item.file_size}
@@ -671,21 +713,12 @@
 				</div>
 				{#if uploading}
 					<div class="mt-2">
-						<div class="h-2 rounded bg-zinc-700">
-							<div class="h-2 rounded bg-indigo-500 transition-all" style="width: {uploadProgress}%"></div>
-						</div>
-						<p class="mt-1 text-xs text-zinc-500">
-							{#if uploadStage === 'analyzing'}
-								<span class="flex items-center gap-1.5">
-									<svg class="h-3 w-3 animate-spin" fill="none" viewBox="0 0 24 24">
-										<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-										<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-									</svg>
-									{selectedFile?.type === 'application/pdf' ? 'Analyzing document with AI...' : 'Analyzing image with AI...'}
-								</span>
-							{:else}
-								Uploading...
-							{/if}
+						<p class="mt-1 text-xs text-zinc-500 flex items-center gap-1.5">
+							<svg class="h-3 w-3 animate-spin" fill="none" viewBox="0 0 24 24">
+								<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+								<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+							</svg>
+							Uploading…
 						</p>
 					</div>
 				{/if}
@@ -778,7 +811,7 @@
 				{#if saving}
 					Saving...
 				{:else if uploading}
-					{uploadStage === 'analyzing' ? 'Analyzing...' : 'Uploading...'}
+					Uploading…
 				{:else if scraping}
 					{crawlMode === 'single' ? 'Scraping...' : 'Crawling...'}
 				{:else}

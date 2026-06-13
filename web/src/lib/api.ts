@@ -396,6 +396,7 @@ export interface KnowledgeItem {
 	title: string;
 	content: string;
 	content_type: string;
+	processing_status?: string;
 	created_at: string;
 	updated_at: string;
 	// Source info
