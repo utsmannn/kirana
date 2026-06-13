@@ -32,7 +32,7 @@ flowchart LR
 | **RAG Pipeline** | Documents → LiteParse → Chunk → Embed (FastEmbed 384d) → pgvector HNSW → Deterministic context injection |
 | **Multi-Provider** | Configure OpenAI, Z.AI, or any OpenAI-compatible API. Switch per channel. |
 | **Channel System** | Each channel = provider + personality + tools + context guard. One server, unlimited use cases. |
-| **Tool Calling** | query_knowledge, get_current_datetime, image analysis (Z.AI GLM-4.6V), web search via MCP |
+| **Tool Calling** | query_knowledge, get_current_datetime, image analysis (Z.AI Vision → LLM fallback), web search via MCP |
 | **Embed Widget** | Drop-in chat iframe with customizable theme and visitor isolation. |
 | **Streaming** | SSE streaming + buffer-based resume for reconnection. |
 | **Admin Panel** | SvelteKit dashboard at `/panel`. |
@@ -213,7 +213,7 @@ Key vars:
 | `OPENAI_API_KEY` | — | Default LLM API key |
 | `DEFAULT_MODEL` | `gpt-4o-mini` | Fallback model |
 | `RAG_ENABLED` | `true` | Enable RAG |
-| `ZAI_API_KEY` | — | Z.AI Vision API key for image analysis |
+| `ZAI_API_KEY` | — | Optional — Z.AI Vision API key. Falls back to LLM provider if not set |
 
 ---
 
@@ -328,7 +328,7 @@ See channel config in admin panel: **Channels → Edit → Context Guard**.
 | Embeddings | FastEmbed (paraphrase-multilingual-MiniLM-L12-v2, 384d) |
 | Chunking | tiktoken (cl100k_base) |
 | Parsing | LiteParse (OCR-enabled) |
-| Image Analysis | Z.AI GLM-4.6V |
+| Image Analysis | Z.AI GLM-4.6V (falls back to configured LLM provider if ZAI_API_KEY not set) |
 | Container | Docker multi-arch (ghcr.io) |
 
 ---
