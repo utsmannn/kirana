@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import os
 import uuid
@@ -8,7 +7,6 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
-from openai import AsyncOpenAI
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,14 +24,8 @@ from app.schemas.knowledge import (
     WebScrapeResponse,
 )
 from app.services.file_processor import FileProcessor, get_mime_type
-from app.services.liteparse_parser import (
-    ParsedDocument,
-    parse_document_generic,
-    parse_document_smart,
-)
 from app.services.rag_ingestion import index_knowledge
 from app.services.web_scraper import crawl_website, scrape_single_url
-from app.services.zai_vision import get_zai_vision_service, is_zai_vision_configured
 
 logger = logging.getLogger(__name__)
 
@@ -46,57 +38,6 @@ try:
 except OSError:
     pass  # handled later during actual upload
 logger.info("[KNOWLEDGE] Upload directory: %s", UPLOAD_DIR)
-
-# Supported types for Z.AI Vision analysis (images + PDFs)
-VISION_TYPES = {
-    'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp',
-    'application/pdf',
-}
-
-# Supported image types for Z.AI Vision analysis
-SUPPORTED_IMAGE_TYPES = {
-    'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp'
-}
-
-LITEPARSE_TYPES = {
-    'application/pdf',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-}
-
-
-def _try_liteparse(file_path: Path, mime_type: str) -> ParsedDocument | None:
-    if not settings.LITEPARSE_ENABLED or mime_type not in LITEPARSE_TYPES:
-        return None
-    try:
-        return parse_document_smart(file_path)
-    except Exception as e:
-        logger.warning("[UPLOAD] LiteParse smart parsing failed, trying generic: %s", e)
-    try:
-        return parse_document_generic(file_path)
-    except Exception as e:
-        logger.warning("[UPLOAD] LiteParse generic parsing failed, falling back: %s", e)
-        return None
-
-
-async def _ai_analyze(prompt: str, model: str | None = None) -> str:
-    api_key = settings.OPENAI_API_KEY
-    base_url = settings.OPENAI_BASE_URL or None
-    client_kwargs = {"api_key": api_key}
-    if base_url:
-        client_kwargs["base_url"] = base_url
-    client = AsyncOpenAI(**client_kwargs)
-
-    model_name = model or settings.DEFAULT_MODEL or "gpt-4o-mini"
-    response = await client.chat.completions.create(
-        model=model_name,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3,
-        max_tokens=2048,
-    )
-    return response.choices[0].message.content or ""
-
 
 @router.post(
     "/", response_model=KnowledgeResponse, status_code=status.HTTP_201_CREATED
@@ -111,6 +52,7 @@ async def create_knowledge(
         content=knowledge_in.content,
         content_type=knowledge_in.content_type,
         extra_metadata=knowledge_in.metadata or {},
+        processing_status="ready",
     )
     db.add(knowledge)
     await db.flush()
@@ -247,470 +189,74 @@ async def upload_knowledge_file(
     auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db_session),
 ):
-    """Upload a file and create knowledge entry with extracted text."""
-    logger.info("[UPLOAD] Starting file upload process")
+    """Upload a file and return immediately with status "processing".
 
-    # Validate file
+    The file is saved and a Knowledge row is created instantly with
+    status "processing". Heavy work (parsing, vision analysis, AI
+    summarization, chunking, embedding) runs in the background via
+    asyncio.create_task.
+
+    Poll GET /v1/knowledge/{id} and check extra_metadata.processing_status:
+      - "processing" → still running
+      - "ready"      → done, content + chunks available
+      - "failed"     → check extra_metadata.processing_error
+    """
+    import asyncio as _asyncio
+
+    from app.services.knowledge_processor import process_upload
+
+    # ----- validate -----
     if not file.filename:
-        logger.error("[UPLOAD] No filename provided")
         raise HTTPException(status_code=400, detail="No file provided")
 
-    logger.info("[UPLOAD] File: %s, Content-Type: %s", file.filename, file.content_type)
-
-    # Get mime type
     mime_type = file.content_type or get_mime_type(file.filename)
-    logger.info("[UPLOAD] Resolved MIME type: %s", mime_type)
 
-    # Check if file type is supported
     if not FileProcessor.is_supported(mime_type):
-        logger.error("[UPLOAD] Unsupported MIME type: %s", mime_type)
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported file type: {mime_type}. Supported types: images, PDF, Word, Excel, PowerPoint, text files"
+            detail=f"Unsupported file type: {mime_type}. "
+                   "Supported types: images, PDF, Word, Excel, PowerPoint, text files",
         )
 
-    logger.info("[UPLOAD] MIME type supported, reading file content...")
-
-    # Read file content
-    try:
-        content = await file.read()
-        file_size = len(content)
-        logger.info("[UPLOAD] File size: %d bytes (%.2f MB)", file_size, file_size / (1024 * 1024))
-    except Exception as e:
-        logger.error("[UPLOAD] Failed to read file: %s", e)
-        raise HTTPException(status_code=400, detail=f"Failed to read file: {str(e)}")
-
-    # Validate file size (max 50MB)
-    max_size = 50 * 1024 * 1024  # 50MB
-    if file_size > max_size:
-        logger.error("[UPLOAD] File too large: %d bytes (max %d)", file_size, max_size)
+    content = await file.read()
+    file_size = len(content)
+    if file_size > 50 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File too large (max 50MB)")
 
-    # Generate unique filename for storage
+    # ----- save file -----
     file_ext = Path(file.filename).suffix
-    stored_filename = f"{uuid.uuid4()}{file_ext}"
-    file_path = UPLOAD_DIR / stored_filename
-
-    logger.info("[UPLOAD] Saving file to: %s", file_path)
-
-    # Save file to disk
-    try:
-        with open(file_path, "wb") as f:
-            f.write(content)
-        logger.info("[UPLOAD] File saved successfully")
-    except Exception as e:
-        logger.error("[UPLOAD] Failed to save file: %s", e)
-        raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
-
-    # Initialize variables
-    extracted_text = ""
-    metadata = {
-        'original_filename': file.filename,
-        'mime_type': mime_type,
-        'file_size': file_size,
-    }
-
-    parsed_document = _try_liteparse(file_path, mime_type)
-    if parsed_document is not None:
-        extracted_text = parsed_document.text
-        metadata["analysis_method"] = "liteparse"
-        metadata["analysis_success"] = True
-        metadata["parser"] = parsed_document.parser
-        metadata["parsing_status"] = parsed_document.parsing_status
-        metadata["pages"] = len(parsed_document.pages)
-        metadata["raw_text_length"] = len(parsed_document.text)
-
-    # Check if file should be analyzed with Vision AI (images + PDFs)
-    is_vision_type = mime_type in VISION_TYPES
-    is_pdf = mime_type == 'application/pdf'
-    is_image = mime_type in SUPPORTED_IMAGE_TYPES
-
-    if parsed_document is not None:
-        logger.info("[UPLOAD] LiteParse extraction complete: %d chars", len(extracted_text))
-    elif is_vision_type:
-        logger.info("[UPLOAD] %s detected",
-                   "PDF" if is_pdf else "Image")
-
-        # ============ PDF PROCESSING WITH FALLBACK ============
-        if is_pdf:
-            # Step 1: Try native text extraction with pypdf (fast)
-            logger.info("[UPLOAD] Step 1: Attempting native PDF text extraction...")
-            pdf_text, pdf_metadata = await FileProcessor.extract_pdf_text(content)
-            metadata.update(pdf_metadata)
-
-            if pdf_text and pdf_text.strip():
-                # SUCCESS: Got text from native extraction
-                logger.info("[UPLOAD] Native extraction successful: %d chars from %d pages",
-                           len(pdf_text), pdf_metadata.get('pages_with_text', 0))
-
-                # Step 2: Analyze extracted text with AI
-                logger.info("[UPLOAD] Step 2: Analyzing extracted text with AI...")
-
-                # Save raw extracted text to metadata
-                metadata["raw_text"] = pdf_text
-                metadata["raw_text_length"] = len(pdf_text)
-
-                try:
-                    model = settings.DEFAULT_MODEL or "gpt-4o-mini"
-                    analysis_prompt = f"""Analyze the following document and provide:
-
-1. A brief SUMMARY (2-3 sentences)
-2. KEY POINTS in bullet points
-
-Document:
-{pdf_text}
-
-Output format:
-## Summary
-[brief summary]
-
-## Key Points
-- [point 1]
-- [point 2]
-- etc..."""
-
-                    ai_summary = await _ai_analyze(analysis_prompt, model)
-
-                    # Combine: AI summary + raw text
-                    extracted_text = f"""{ai_summary}
-
----
-
-## Original Document
-
-{pdf_text}"""
-
-                    metadata["analysis_method"] = "native_extract_ai_analyze"
-                    metadata["analysis_success"] = True
-                    metadata["analysis_model"] = model
-                    logger.info("[UPLOAD] AI analysis complete: %d chars (summary + raw)", len(extracted_text))
-
-                except Exception as e:
-                    # AI analysis failed, save raw text only
-                    logger.warning("[UPLOAD] AI analysis failed, saving raw extracted text: %s", e)
-                    extracted_text = pdf_text
-                    metadata["analysis_method"] = "native_extract_only"
-                    metadata["analysis_success"] = True
-                    metadata["ai_analysis_error"] = str(e)
-
-            else:
-                # FAILED: Native extraction empty - likely scanned PDF
-                logger.info("[UPLOAD] Native extraction empty (likely scanned PDF), falling back to Vision API...")
-
-                # Check if Z.AI Vision is configured
-                if not is_zai_vision_configured():
-                    logger.error("[UPLOAD] Z.AI Vision not configured for scanned PDF fallback")
-                    extracted_text = "[PDF Analysis Failed: Document appears to be scanned (no extractable text) and Z.AI Vision is not configured. Set ZAI_API_KEY to enable Vision analysis.]"
-                    metadata["analysis_success"] = False
-                    metadata["analysis_error"] = "scanned_pdf_no_vision"
-                else:
-                    # Step 3: Fallback to Vision API
-                    try:
-                        zai_vision = get_zai_vision_service()
-
-                        logger.info("[UPLOAD] Converting PDF to images for Vision analysis...")
-                        pages = await FileProcessor.pdf_to_images(content, dpi=150, timeout=60.0)
-                        metadata["pdf_pages"] = len(pages)
-                        logger.info("[UPLOAD] PDF has %d pages, sending to Vision API", len(pages))
-
-                        # Limit pages to avoid timeout
-                        max_pages = 15
-                        if len(pages) > max_pages:
-                            logger.warning("[UPLOAD] Limiting to first %d pages", max_pages)
-                            pages = pages[:max_pages]
-
-                        pdf_prompt = f"""This is a {len(pages)}-page scanned PDF document. Extract ALL text content from each page.
-
-For each page:
-1. Start with "--- Page X ---" header
-2. Transcribe ALL visible text exactly as shown
-3. For tables: recreate them in markdown format
-4. Preserve the reading order
-
-Be exhaustive - capture 100% of the text."""
-
-                        result = await asyncio.wait_for(
-                            zai_vision.analyze_multiple_images(images=pages, prompt=pdf_prompt),
-                            timeout=120.0
-                        )
-
-                        if result["success"] and result.get("content"):
-                            extracted_text = result["content"]
-                            metadata["analysis_method"] = "vision_api_multimodal"
-                            metadata["analysis_success"] = True
-                            logger.info("[UPLOAD] Vision API analysis complete: %d chars", len(extracted_text))
-                        else:
-                            extracted_text = f"[PDF Analysis Failed: Vision API returned no content - {result.get('error', 'Unknown error')}]"
-                            metadata["analysis_success"] = False
-                            metadata["analysis_error"] = result.get("error", "no_content")
-
-                    except asyncio.TimeoutError:
-                        logger.error("[UPLOAD] Vision API timed out")
-                        extracted_text = "[PDF Analysis Failed: Vision analysis timed out - PDF may be too large]"
-                        metadata["analysis_success"] = False
-                        metadata["analysis_error"] = "vision_timeout"
-                    except Exception as e:
-                        logger.exception("[UPLOAD] Vision API failed: %s", e)
-                        extracted_text = f"[PDF Analysis Failed: {str(e)}]"
-                        metadata["analysis_success"] = False
-                        metadata["analysis_error"] = str(e)
-
-        # ============ IMAGE PROCESSING ============
-        else:
-            # Direct image analysis
-            if not is_zai_vision_configured():
-                logger.warning("[UPLOAD] Z.AI Vision not configured for image analysis")
-                extracted_text = "[Image uploaded but Z.AI Vision not configured. Set ZAI_API_KEY to enable analysis.]"
-                metadata["analysis_success"] = False
-                metadata["analysis_error"] = "vision_not_configured"
-            else:
-                try:
-                    zai_vision = get_zai_vision_service()
-                    result = await asyncio.wait_for(
-                        zai_vision.analyze_image(
-                            image_source=str(file_path),
-                            prompt="Describe this image in detail. Include: 1) Main subjects/objects, 2) Colors and composition, 3) Any text visible in the image, 4) Overall mood/atmosphere, 5) Any other relevant details.",
-                        ),
-                        timeout=60.0
-                    )
-
-                    if result["success"] and result.get("content"):
-                        extracted_text = result["content"]
-                        metadata["analysis_method"] = "vision_api"
-                        metadata["analysis_success"] = True
-                    else:
-                        extracted_text = f"[Image Analysis Failed: {result.get('error', 'Unknown error')}]"
-                        metadata["analysis_success"] = False
-                        metadata["analysis_error"] = result.get("error")
-
-                except asyncio.TimeoutError:
-                    extracted_text = "[Image Analysis Failed: Timeout]"
-                    metadata["analysis_success"] = False
-                    metadata["analysis_error"] = "timeout"
-                except Exception as e:
-                    extracted_text = f"[Image Analysis Failed: {str(e)}]"
-                    metadata["analysis_success"] = False
-                    metadata["analysis_error"] = str(e)
-
-        metadata["content_type"] = "pdf" if is_pdf else "image"
-
-    else:
-        # ============ DOCUMENT PROCESSING (Word, Excel, PowerPoint, Text) ============
-
-        is_word = mime_type in (
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            'application/msword'
-        )
-        is_excel = mime_type in (
-            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            'application/vnd.ms-excel'
-        )
-        is_ppt = mime_type in (
-            'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-            'application/vnd.ms-powerpoint'
-        )
-        is_text = mime_type in ('text/plain', 'text/markdown', 'text/csv')
-
-        # ============ EXCEL: Use Vision API (sheets -> images) ============
-        if is_excel:
-            logger.info("[UPLOAD] Excel detected, converting sheets to images...")
-
-            if not is_zai_vision_configured():
-                raise HTTPException(status_code=400, detail="Excel requires Z.AI Vision API. Set ZAI_API_KEY to enable it.")
-
-            try:
-                # Step 1: Convert sheets to images
-                images, img_metadata = await FileProcessor.excel_to_images(content, max_rows_per_sheet=50)
-                metadata.update(img_metadata)
-
-                if not images:
-                    raise HTTPException(status_code=400, detail="No data found in Excel file")
-
-                logger.info("[UPLOAD] Converted %d sheets to images, sending to Vision API", len(images))
-
-                # Step 2: Analyze with Vision API
-                zai_vision = get_zai_vision_service()
-
-                excel_prompt = f"""Read and extract ALL data from this Excel spreadsheet which has {len(images)} sheets.
-
-MAIN TASK: Extract data COMPLETELY and ACCURATELY so it can be queried without the original file.
-
-For EACH sheet, provide:
-
-## Sheet: [sheet name]
-
-### Structure
-- Column count: X
-- Column names: [list all columns]
-
-### Complete Data
-| Col1 | Col2 | Col3 | ... |
-|------|------|------|-----|
-| val1 | val2 | val3 | ... |
-| ...  | ...  | ...  | ... |
-
-### Notes
-- Total rows: X
-- [other important info]
-
-IMPORTANT:
-- Transcribe ALL visible values accurately
-- Do NOT summarize or skip any data
-- Format numbers and dates exactly as shown in the image
-- If a cell is empty, write "[empty]" """
-
-                result = await asyncio.wait_for(
-                    zai_vision.analyze_multiple_images(images=images, prompt=excel_prompt),
-                    timeout=120.0
-                )
-
-                if result["success"] and result.get("content"):
-                    extracted_text = result["content"]
-                    metadata["analysis_method"] = "vision_api_excel"
-                    metadata["analysis_success"] = True
-                    logger.info("[UPLOAD] Excel Vision analysis complete: %d chars", len(extracted_text))
-                else:
-                    raise HTTPException(status_code=400, detail=f"Vision API failed: {result.get('error', 'Unknown error')}")
-
-            except asyncio.TimeoutError:
-                raise HTTPException(status_code=400, detail="Excel analysis timed out")
-            except HTTPException:
-                raise
-            except Exception as e:
-                logger.exception("[UPLOAD] Excel processing failed: %s", e)
-                raise HTTPException(status_code=400, detail=f"Failed to process Excel: {str(e)}")
-
-        # ============ WORD, PPT, TEXT: Extract text -> AI analysis ============
-        elif is_word or is_ppt or is_text:
-            # Step 1: Extract text from document
-            logger.info("[UPLOAD] Step 1: Extracting text from %s...", mime_type)
-
-            if is_word:
-                doc_text, doc_metadata = await FileProcessor.extract_word_text(content)
-            elif is_ppt:
-                doc_text, doc_metadata = await FileProcessor.extract_powerpoint_text(content)
-            elif is_text:
-                doc_text = content.decode('utf-8', errors='ignore')
-                doc_metadata = {'extraction_method': 'direct_decode'}
-
-            metadata.update(doc_metadata)
-
-            # Check if extraction succeeded
-            if doc_text and doc_text.strip():
-                # Save raw text to metadata
-                metadata["raw_text"] = doc_text
-                metadata["raw_text_length"] = len(doc_text)
-
-                # Step 2: Analyze with AI
-                logger.info("[UPLOAD] Step 2: Analyzing document with AI...")
-                try:
-                    model = settings.DEFAULT_MODEL or "gpt-4o-mini"
-
-                    doc_type_name = "Word" if is_word else "PowerPoint"
-
-                    analysis_prompt = f"""Analyze the following {doc_type_name} document and provide:
-
-1. A brief SUMMARY (2-3 sentences)
-2. KEY POINTS in bullet points
-
-Document:
-{doc_text}
-
-Output format:
-## Summary
-[brief summary]
-
-## Key Points
-- [point 1]
-- [point 2]
-- etc..."""
-
-                    ai_summary = await _ai_analyze(analysis_prompt, model)
-
-                    # Combine: AI summary + raw text
-                    extracted_text = f"""{ai_summary}
-
----
-
-## Original Document
-
-{doc_text}"""
-
-                    metadata["analysis_method"] = "extract_ai_analyze"
-                    metadata["analysis_success"] = True
-                    metadata["analysis_model"] = model
-                    logger.info("[UPLOAD] AI analysis complete: %d chars (summary + raw)", len(extracted_text))
-
-                except Exception as e:
-                    logger.warning("[UPLOAD] AI analysis failed, saving raw extracted text: %s", e)
-                    extracted_text = doc_text
-                    metadata["analysis_method"] = "extract_only"
-                    metadata["analysis_success"] = True
-                    metadata["ai_analysis_error"] = str(e)
-
-            else:
-                # Extraction returned empty
-                error_msg = doc_metadata.get('error', 'No text content could be extracted')
-                if file_path.exists():
-                    file_path.unlink()
-                if doc_metadata.get('unsupported_format') == 'doc_legacy':
-                    raise HTTPException(status_code=400, detail=error_msg)
-                else:
-                    raise HTTPException(status_code=400, detail=f"Failed to extract text: {error_msg}")
-
-        else:
-            # Unsupported file type
-            if file_path.exists():
-                file_path.unlink()
-            raise HTTPException(status_code=400, detail=f"Unsupported file type: {mime_type}")
-
-    metadata['extracted_length'] = len(extracted_text) if extracted_text else 0
-
-    # Safeguard: ensure extracted_text is never None
-    if extracted_text is None:
-        logger.warning("[UPLOAD] extracted_text was None, defaulting to empty string")
-        extracted_text = ""
-
-    # Create knowledge entry
-    logger.info("[UPLOAD] Creating knowledge entry in database...")
-    logger.info("[UPLOAD] Content length: %d chars", len(extracted_text))
-
-    # Map MIME types to short content_type (max 50 chars in DB)
-    content_type_map = {
-        'application/pdf': 'pdf',
-        'application/msword': 'word',
-        'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'word',
-        'application/vnd.ms-excel': 'excel',
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'excel',
-        'application/vnd.ms-powerpoint': 'powerpoint',
-        'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'powerpoint',
-        'text/plain': 'text',
-        'text/markdown': 'markdown',
-        'text/csv': 'csv',
-        'image/jpeg': 'jpeg',
-        'image/png': 'png',
-        'image/gif': 'gif',
-        'image/webp': 'webp',
-    }
-    short_content_type = content_type_map.get(mime_type, mime_type.split('/')[-1][:50])
-
+    stored_name = f"{uuid.uuid4()}{file_ext}"
+    file_path = UPLOAD_DIR / stored_name
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    # ----- create Knowledge row immediately -----
     knowledge = Knowledge(
         title=title or file.filename,
-        content=extracted_text,
-        content_type=short_content_type,
+        content="",                                          # filled by background processor
+        content_type=mime_type.split("/")[-1][:50],
+        source_type="upload",
         file_path=str(file_path),
         file_name=file.filename,
         file_size=file_size,
         mime_type=mime_type,
-        extra_metadata=metadata,
+        extra_metadata={
+            "original_filename": file.filename,
+            "mime_type": mime_type,
+            "file_size": file_size,
+        },
+        processing_status="processing",
     )
     db.add(knowledge)
     await db.flush()
-    await index_knowledge(db, knowledge, parsed_document=parsed_document)
     await db.commit()
     await db.refresh(knowledge)
 
-    logger.info("[UPLOAD] Upload complete. Knowledge ID: %s", knowledge.id)
+    logger.info("[UPLOAD] Knowledge %s created (status=processing), dispatching background processor", knowledge.id)
+
+    # ----- fire-and-forget background processing -----
+    knowledge_id = knowledge.id
+    _asyncio.create_task(process_upload(knowledge_id))
 
     return knowledge
 

@@ -67,6 +67,7 @@ class KnowledgeResponse(BaseModel):
     # Use extra_metadata here to match model, but alias to metadata for JSON output
     extra_metadata: Optional[Dict[str, Any]] = Field(default={}, serialization_alias="metadata")
     is_active: bool
+    processing_status: str = "ready"
     created_at: datetime
 
     # Source info

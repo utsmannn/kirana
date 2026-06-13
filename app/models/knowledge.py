@@ -34,6 +34,10 @@ class Knowledge(Base):
     mime_type = Column(String(100), nullable=True)  # MIME type
 
     extra_metadata = Column("metadata", JSONB, default=lambda: {})
+    processing_status = Column(
+        String(20), default="ready", nullable=False, index=True,
+        comment="ready | processing | failed — async upload processing state"
+    )
     embedding = Column(JSONB, nullable=True)
     is_active = Column(Boolean, default=True, index=True)
     created_at = Column(DateTime(timezone=True), default=_utcnow)

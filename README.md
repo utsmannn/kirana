@@ -178,6 +178,8 @@ curl -X POST http://localhost:8000/v1/knowledge/upload \
 
 **Pipeline:** Upload → LiteParse → Chunk (tiktoken 800/120) → Embed (FastEmbed 384d) → pgvector HNSW
 
+**Upload is fire-and-forget.** `POST /v1/knowledge/upload` returns immediately with `"processing_status": "processing"`. Heavy work (parsing, vision, indexing) runs in the background. Poll `GET /v1/knowledge/{id}` — when `processing_status` becomes `"ready"` the document is indexed and queryable. Check `metadata.processing_error` if status is `"failed"`.
+
 **At query time:** User message → embed → cosine search → top-10 chunks → inject `[S1] [S2]` citations into system prompt → LLM responds with sourced answers.
 
 RAG is **deterministic** — it runs before every chat request automatically.
