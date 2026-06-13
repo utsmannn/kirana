@@ -2,138 +2,382 @@
 
 Kirana is a production-ready AI chat platform with built-in RAG. It wraps AI providers (OpenAI, Z.AI, any OpenAI-compatible API) behind a **Provider → Channel → Session** architecture and deterministically injects knowledge base chunks into every chat request so the LLM always has the right context.
 
-Use this guide when an AI agent needs to install Kirana locally, understand its API surface, or build an integration on top of it.
+Use this guide when an AI agent needs to install Kirana, understand its API surface, or build an integration on top of it.
 
 ---
 
-## What Kirana Provides
+## 1. Installation
 
-- **`POST /v1/chat/send`** — primary chat endpoint with OpenAI-compatible message format, SSE streaming support, and deterministic RAG context injection.
-- **RAG pipeline** — document upload → LiteParse → chunk (tiktoken 800/120) → embed (FastEmbed 384d) → pgvector HNSW storage → automatic context injection at query time.
-- **Multi-provider routing** — configure multiple AI APIs, switch per channel, activate/deactivate. No silent fallback when a channel's provider is broken.
-- **Channel system** — each channel binds a provider to a personality, system prompt, tools, and context guard. One server, unlimited use cases.
-- **Embed widget** — drop-in chat iframe for any website with visitor isolation and customizable theme.
-- **Admin panel** — SvelteKit dashboard at `/panel`.
+### Option A: Docker (Recommended)
 
----
+Kirana is published as a multi-arch Docker image (amd64 + arm64) on GitHub Container Registry.
 
-## Files to Read (in order)
-
-| # | File | Purpose |
-|---|------|---------|
-| 1 | `README.md` | Project overview, quick start, deployment, RAG behavior, configuration reference. |
-| 2 | `docs/API_REFERENCE.md` | Complete API contract: every endpoint, auth methods, request/response schemas, trailing-slash rules, provider error codes, canonical integration flows. |
-| 3 | `docs/TECH_DOC.md` | Internals: chat service orchestration, RAG pipeline, database schema, provider resolution, streaming, error handling, deployment. |
-| 4 | `app/api/v1/router.py` | All registered API routes and their prefixes. |
-| 5 | `app/api/deps.py` | Authentication dependencies (`verify_api_key`, `verify_api_key_or_admin_token`, `verify_chat_auth`, `get_current_client`, etc.). |
-| 6 | `app/schemas/chat.py` | `ChatCompletionRequest` / `ChatCompletionResponse` Pydantic models — the primary API contract. |
-| 7 | `app/services/chat_service.py` | Chat orchestration: provider resolution, system prompt building, RAG injection, tool calling, streaming, and provider error mapping. |
-| 8 | `app/api/v1/knowledge.py` | Knowledge CRUD, file upload, LiteParse parsing, RAG indexing pipeline. |
-| 9 | `app/config.py` | All environment variables with defaults (Pydantic Settings model). |
-| 10 | `app/core/security.py` | API key generation and SHA256 hashing. |
-
----
-
-## Local Development Setup
+**Check the latest version:**
 
 ```bash
-# 1. Start infrastructure (PostgreSQL/pgvector + Redis)
+# List available tags on ghcr.io
+curl -s https://api.github.com/repos/utsmannn/kirana/packages/container/kirana/versions | python3 -c "
+import json, sys
+for v in json.load(sys.stdin):
+    print(v['metadata']['container']['tags'])
+" 2>/dev/null || echo "Check https://github.com/utsmannn/kirana/pkgs/container/kirana"
+
+# Or check GitHub releases
+curl -s https://api.github.com/repos/utsmannn/kirana/releases/latest | python3 -c "
+import json, sys
+print(json.load(sys.stdin).get('tag_name', 'unknown'))
+"
+```
+
+**Create a `docker-compose.yml`:**
+
+```yaml
+services:
+  kirana:
+    image: ghcr.io/utsmannn/kirana:latest
+    ports:
+      - "8000:8000"
+    environment:
+      - KIRANA_API_KEY=your-secure-api-key-change-me
+      - ADMIN_PASSWORD=your-admin-password-change-me
+      - SECRET_KEY=$(openssl rand -hex 32)
+      - DB_HOST=postgres
+      - DB_USER=kirana
+      - DB_PASS=kirana
+      - DB_NAME=kirana
+      - REDIS_HOST=redis
+      - OPENAI_API_KEY=sk-your-openai-api-key
+      - DEFAULT_MODEL=gpt-4o-mini
+      - APP_ENV=production
+      - DEBUG=false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - kirana-uploads:/app/uploads
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      - POSTGRES_USER=kirana
+      - POSTGRES_PASSWORD=kirana
+      - POSTGRES_DB=kirana
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kirana -d kirana"]
+      interval: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  kirana-uploads:
+  postgres-data:
+  redis-data:
+```
+
+**Start it:**
+
+```bash
+# Pull the image and start all services
+docker compose up -d
+
+# Watch the logs
+docker compose logs -f kirana
+
+# Verify everything is healthy
+curl http://localhost:8000/health
+# → {"app":"kirana","status":"ok","database":"ok","redis":"ok"}
+```
+
+**Pin a specific version in production:**
+
+```yaml
+image: ghcr.io/utsmannn/kirana:v1.0.0   # instead of :latest
+```
+
+### Option B: Local Development (for customizing the code)
+
+Infrastructure runs in Docker, backend + frontend run locally with hot-reload.
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/utsmannn/kirana.git
+cd kirana
+
+# 2. Start infrastructure (PostgreSQL/pgvector + Redis)
 make infra
 
-# 2. Install dependencies
+# 3. Install dependencies
 make install-python
 make install-web
 
-# 3. Run database migrations
+# 4. Run database migrations
 make migrate
 
-# 4. Start backend + frontend
+# 5. Start backend + frontend (logs to console, Ctrl+C stops both)
 make dev
 
-# 5. Verify
+# 6. Verify
 curl http://localhost:8000/health
-# Open http://localhost:8000/panel
+# → {"app":"kirana","status":"ok","database":"ok","redis":"ok"}
+
+# Open the admin dashboard
+open http://localhost:8000/panel
 ```
 
-Backend runs on port 8000, frontend dev server on port 5173. Ctrl+C stops both.
+Backend runs on port 8000, frontend dev server on port 5173.
 
 ---
 
-## API Exploration Order
+## 2. Configuration
 
-When exploring the API to build an integration, follow this order:
+### Required Environment Variables
 
-1. **`POST /v1/admin/login`** — get an admin token.
-2. **`GET /v1/providers/`** — inspect current provider configuration.
-3. **`POST /v1/providers/`** + **`POST /v1/providers/{id}/activate`** — add and activate an AI provider if none is configured.
-4. **`GET /v1/channels/`** — list channels, note the `default_channel` or pick a specific `channel_id`.
-5. **`POST /v1/sessions/`** — create a session with `channel_id`.
-6. **`POST /v1/chat/send`** — send chat messages with `channel_id` and optional `session_id`.
-7. **`POST /v1/knowledge/upload`** — upload documents for RAG.
-8. **`POST /v1/chat/send`** — ask a grounded question that should use uploaded knowledge.
+| Variable | Purpose |
+|----------|---------|
+| `KIRANA_API_KEY` | Server API key used to authenticate all admin/API calls |
+| `ADMIN_PASSWORD` | Admin panel login password |
+| `SECRET_KEY` | Used for admin token generation (SHA256 daily rotation) |
+| `OPENAI_API_KEY` | Default LLM API key (fallback when no provider configured) |
+
+### Recommended overrides for production
+
+| Variable | Default | Recommended |
+|----------|---------|-------------|
+| `DEFAULT_MODEL` | `gpt-4o-mini` | Your preferred model |
+| `OPENAI_BASE_URL` | OpenAI default | Your provider's base URL if using alternatives |
+| `CORS_ORIGINS` | Allow all | Your domain(s) |
+| `RATE_LIMIT_REQUESTS_PER_MINUTE` | 60 | Adjust for expected load |
+| `RAG_ENABLED` | `true` | `true` to keep RAG on |
+
+See `.env.example` in the repository for the full list.
 
 ---
 
-## API Rules
+## 3. Post-Installation — Admin Setup
+
+Before you can chat, you need at least one provider and one channel. Follow this order:
+
+### Step 1: Login to get an admin token
+
+```bash
+curl -X POST http://localhost:8000/v1/admin/login \
+  -H "Content-Type: application/json" \
+  -d '{"password": "your-admin-password"}'
+# → {"token": "abc123..."}
+```
+
+Save the token — use it for all subsequent API calls in this setup.
+
+### Step 2: Check if a provider already exists
+
+```bash
+curl http://localhost:8000/v1/providers/ \
+  -H "Authorization: Bearer <admin-token>"
+```
+
+If the response shows an active provider, skip to Step 4.
+
+### Step 3: Add and activate an AI provider
+
+```bash
+# Add a provider
+curl -X POST http://localhost:8000/v1/providers/ \
+  -H "Authorization: Bearer <admin-token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "OpenAI",
+    "model": "gpt-4o-mini",
+    "api_key": "sk-your-key-here",
+    "base_url": null
+  }'
+
+# Activate it (use the returned provider ID)
+curl -X POST http://localhost:8000/v1/providers/<provider-id>/activate \
+  -H "Authorization: Bearer <admin-token>"
+```
+
+### Step 4: Check existing channels
+
+```bash
+curl http://localhost:8000/v1/channels/ \
+  -H "Authorization: Bearer <admin-token>"
+```
+
+Note the `default_channel.id`. If none exists, create one:
+
+### Step 5: Create a channel (if needed)
+
+```bash
+curl -X POST http://localhost:8000/v1/channels/ \
+  -H "Authorization: Bearer <admin-token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Default",
+    "provider_id": "<provider-id>",
+    "personality_name": "Helpful Assistant"
+  }'
+
+# Set it as default
+curl -X POST http://localhost:8000/v1/channels/<channel-id>/set-default \
+  -H "Authorization: Bearer <admin-token>"
+```
+
+### Step 6: Test chat
+
+```bash
+curl -X POST http://localhost:8000/v1/chat/send \
+  -H "Authorization: Bearer <admin-token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "channel_id": "<channel-id>",
+    "stream": false
+  }'
+```
+
+---
+
+## 4. API Quick Reference
 
 ### Base URL
+
 ```
-http://localhost:8000/v1
+http://<host>:8000/v1
 ```
 
 ### Auth
+
 All endpoints use `Authorization: Bearer <token>`. Four auth methods:
-- **Server API key** (`KIRANA_API_KEY` from `.env`) — full access.
-- **Admin token** (from `POST /v1/admin/login`) — full access, rotates daily.
-- **Client API key** (from `POST /v1/clients/`) — SHA256-hashed, external consumers.
-- **Embed token** (from channel config) — chat only, per-channel isolation.
 
-### Chat Endpoint
-Use `POST /v1/chat/send` for chat. It accepts OpenAI-compatible request/response format with Kirana extensions:
+| Method | Token source | Scope |
+|--------|-------------|-------|
+| Server API key | `KIRANA_API_KEY` from `.env` | All endpoints |
+| Admin token | `POST /v1/admin/login` | All endpoints (rotates daily) |
+| Client API key | `POST /v1/clients/` (one-time display) | Chat, knowledge, `/v1/clients/me` |
+| Embed token | Channel config | Chat only (per-channel) |
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `messages` | array | Yes | OpenAI-format `[{role, content}]` |
-| `channel_id` | UUID | Recommended | Channel to use for provider/personality/tools |
-| `session_id` | UUID | No | For persistent conversation history |
-| `stream` | bool | No | Enable SSE streaming |
-| `visitor_id` | string | No | Embed widget visitor tracking |
+### Trailine Slashes
 
-**Always pass `channel_id`** when chatting. Without it, Kirana cannot resolve the intended provider, personality, tools, or context guard.
-
-### Trailing Slashes
-FastAPI enforces strict trailing slash behavior:
-- Collection endpoints need `/`: `GET /v1/providers/`, `POST /v1/knowledge/`, `POST /v1/sessions/`
-- Singular endpoints must not have `/`: `GET /v1/clients/me`, `GET /v1/providers/{id}`
+- Collection endpoints **require** a trailing slash: `/v1/providers/`, `/v1/knowledge/`, `/v1/sessions/`, `/v1/clients/`
+- Singular endpoints must **not** have one: `/v1/clients/me`, `/v1/providers/{id}`, `/v1/channels/{id}`
 - Wrong slash → `307` redirect.
 
-### Provider Errors
-Provider/configuration failures return structured errors. Do not silently ignore them:
+### Key Endpoints
 
-| Code | Status | Meaning |
-|------|--------|---------|
-| `provider_config_error` | 502 | Channel has inactive/missing provider, or no API key configured. Fix provider config — do not retry blindly. |
-| `provider_error` + `AuthenticationError` | 502 | Provider rejected API key. Update credentials. |
-| `provider_error` + `RateLimitError` | 429 | Upstream rate limit. Retry with backoff. |
-| `provider_error` + `APITimeoutError`/`APIConnectionError` | 504 | Provider unreachable. Check base URL/network, retry with backoff. |
-| `provider_error` | 502 | Generic provider API error. |
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/health` | Health check (no auth) |
+| `POST` | `/v1/admin/login` | Get admin token |
+| `POST` | `/v1/chat/send` | **Primary chat endpoint** — send messages, get responses |
+| `WS` | `/v1/chat/ws` | WebSocket chat |
+| `POST` | `/v1/knowledge/upload` | Upload documents for RAG |
+| `GET` | `/v1/knowledge/` | List/search knowledge items |
+| `GET` | `/v1/channels/` | List channels |
+| `POST` | `/v1/sessions/` | Create a chat session |
+| `GET` | `/v1/sessions/{id}/messages` | Get conversation history |
+| `GET` | `/v1/providers/` | List AI providers |
 
-Streaming chat sends these as SSE `error` payloads before `[DONE]`:
+Full API contract: [`docs/API_REFERENCE.md`](API_REFERENCE.md)
+
+---
+
+## 5. Chat Request Format
+
+`POST /v1/chat/send` accepts OpenAI-compatible messages plus Kirana extensions:
+
+```json
+{
+  "messages": [{"role": "user", "content": "Hello!"}],
+  "channel_id": "<uuid>",
+  "session_id": "<uuid>",
+  "stream": false,
+  "temperature": 0.7,
+  "max_tokens": 4096
+}
+```
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `messages` | array | **Required.** OpenAI `[{role, content}]` format |
+| `channel_id` | UUID | **Always pass this.** Tells Kirana which provider/personality/tools to use |
+| `session_id` | UUID | Optional. For persistent conversation history |
+| `stream` | bool | Enable SSE streaming |
+| `visitor_id` | string | Embed widget visitor tracking |
+
+**SET `channel_id` for every chat request.** Without it Kirana doesn't know which provider to use.
+
+---
+
+## 6. RAG — Knowledge Upload & Retrieval
+
+### Upload a document
+
+```bash
+curl -X POST http://localhost:8000/v1/knowledge/upload \
+  -H "Authorization: Bearer <token>" \
+  -F "file=@document.pdf" \
+  -F "title=Company Handbook"
+```
+
+Supported formats: PDF, DOCX, TXT, CSV, MD, JSON, XLSX, PPTX, PNG, JPG.
+
+### What happens after upload
+
+1. **LiteParse** parses the document (OCR for PDFs)
+2. **Chunking** — tiktoken `cl100k_base`, 800-token chunks, 120-token overlap
+3. **Embedding** — FastEmbed `paraphrase-multilingual-MiniLM-L12-v2`, 384-dim vectors
+4. **Storage** — pgvector with HNSW cosine distance index
+
+### How retrieval works at chat time
+
+1. User sends a chat message
+2. Kirana embeds the latest user message
+3. Searches `knowledge_chunks` via pgvector cosine similarity
+4. Injects top-10 most relevant chunks into the system prompt
+5. LLM responds with `[S1]`, `[S2]` citations
+
+**RAG is deterministic** — it runs automatically before every chat request. The LLM doesn't decide whether to search.
+
+---
+
+## 7. Provider Error Handling
+
+When the AI provider fails, Kirana returns structured errors. Do **not** silently ignore them.
+
+| Error code | HTTP | Meaning | What to do |
+|-----------|------|---------|------------|
+| `provider_config_error` | 502 | Channel has inactive/missing provider, or no API key | Fix provider config in admin panel |
+| `provider_error` (AuthenticationError) | 502 | Provider rejected API key | Update provider credentials |
+| `provider_error` (RateLimitError) | 429 | Upstream rate limit | Retry with backoff |
+| `provider_error` (APITimeoutError / APIConnectionError) | 504 | Provider unreachable | Check base URL/network, retry with backoff |
+| `provider_error` (generic) | 502 | Provider returned an error | Check provider config, try again |
+
+**Streaming chat** sends these as SSE payloads before `[DONE]`:
 ```text
 data: {"error":{"code":"provider_error","message":"...","status_code":502}}
 
 data: [DONE]
 ```
 
-### RAG Behavior
-- RAG is **deterministic**, not tool-based. Relevant chunks are automatically retrieved and injected into the system prompt before every chat request.
-- Citations use `[S1]`, `[S2]` format. Each maps to a chunk with provenance metadata (page number, source document, etc.).
-- No relevant chunks found → no RAG context injected. LLM answers from training data.
-- Updating knowledge via `PATCH` triggers full re-indexing.
-
 ---
 
-## Canonical Flow for Building an Integration
+## 8. Canonical Integration Flow
 
 ```
 1. POST /v1/clients/              → register, get API key
@@ -147,18 +391,27 @@ data: [DONE]
 
 ---
 
-## Docker Deployment
+## 9. Repository Files (for code-level understanding)
 
-Pre-built multi-arch image (amd64 + arm64):
-```bash
-docker pull ghcr.io/utsmannn/kirana:latest
-```
-
-Infrastructure (PostgreSQL/pgvector + Redis) via Docker Compose. App image runs the full stack (backend + frontend + entrypoint).
+| # | File | Purpose |
+|---|------|---------|
+| 1 | `README.md` | Project overview, quick start, configuration, RAG behavior, deployment. |
+| 2 | `docs/API_REFERENCE.md` | Full API contract: endpoints, auth, schemas, error codes, flows. |
+| 3 | `docs/TECH_DOC.md` | Internals: chat service, RAG pipeline, DB schema, streaming, deployment. |
+| 4 | `app/api/v1/router.py` | All registered API routes and prefixes. |
+| 5 | `app/api/deps.py` | Authentication dependencies. |
+| 6 | `app/schemas/chat.py` | Chat request/response Pydantic models. |
+| 7 | `app/services/chat_service.py` | Chat orchestration: provider resolution, prompt building, RAG injection, streaming, error mapping. |
+| 8 | `app/api/v1/knowledge.py` | Knowledge CRUD, file upload, parsing, RAG indexing. |
+| 9 | `app/config.py` | All environment variables with defaults. |
+| 10 | `app/core/security.py` | API key generation and SHA256 hashing. |
+| 11 | `docker-compose.yml` | Infrastructure services (PostgreSQL/pgvector + Redis). |
+| 12 | `Dockerfile` | Multi-stage production image build. |
+| 13 | `Makefile` | Local dev workflow targets. |
 
 ---
 
-## Tech Stack
+## 10. Tech Stack
 
 | Component | Technology |
 |-----------|-----------|
@@ -170,4 +423,5 @@ Infrastructure (PostgreSQL/pgvector + Redis) via Docker Compose. App image runs 
 | Embeddings | FastEmbed (paraphrase-multilingual-MiniLM-L12-v2, 384d) |
 | Chunking | tiktoken (cl100k_base) |
 | Parsing | LiteParse (OCR-enabled) |
-| Container | Docker multi-arch, ghcr.io |
+| Container | Docker multi-arch (amd64 + arm64), ghcr.io |
+| CI/CD | GitHub Actions — build + push on tag/release |
