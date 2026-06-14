@@ -777,14 +777,17 @@ export interface McpToolDefinition {
 	input_schema?: Record<string, unknown>;
 }
 
+export type McpTransport = 'sse' | 'http' | 'stdio';
+
 export interface McpServer {
 	id: string;
 	channel_id: string;
 	name: string;
-	server_url: string;
-	transport: 'sse' | 'http';
+	server_url: string | null;
+	transport: McpTransport;
 	auth_type: 'none' | 'bearer' | 'custom_header';
 	auth_configured: boolean;
+	server_configured: boolean;
 	is_active: boolean;
 	created_at?: string;
 	updated_at?: string;
@@ -792,10 +795,11 @@ export interface McpServer {
 
 export interface McpServerCreate {
 	name: string;
-	server_url: string;
-	transport?: 'sse' | 'http';
+	server_url?: string | null;
+	transport?: McpTransport;
 	auth_type?: 'none' | 'bearer' | 'custom_header';
 	auth_config?: Record<string, unknown>;
+	server_config?: Record<string, unknown>;
 }
 
 export interface McpServerTestResponse {

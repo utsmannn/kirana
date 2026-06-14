@@ -431,15 +431,27 @@ Make this channel the default (unsets all others).
 MCP servers are configured per channel. A channel can have multiple active MCP servers; Kirana discovers tools from all active servers for that channel at chat-request time.
 
 Supported transports:
-- `sse` — MCP SSE endpoint
-- `http` — MCP streamable HTTP endpoint
+- `sse` — legacy MCP SSE endpoint
+- `http` — MCP Streamable HTTP endpoint
+- `stdio` — local MCP child process launched by the backend
 
 Supported auth types:
 - `none` — no extra auth headers
-- `bearer` — pass `Authorization: Bearer <token>` from `auth_config.token`
-- `custom_header` — pass headers from `auth_config.headers`
+- `bearer` — pass `Authorization: Bearer <token>` from `auth_config.token` for remote transports
+- `custom_header` — pass headers from `auth_config.headers` for remote transports
 
-`auth_config` is write-only. Responses expose `auth_configured: boolean` and never return raw credentials.
+`server_url` is required for `sse`/`http` and must use `http://` or `https://`. For `stdio`, use `server_config` instead:
+
+```json
+{
+  "command": "npx",
+  "args": ["-y", "@modelcontextprotocol/server-everything"],
+  "env": {},
+  "cwd": null
+}
+```
+
+`auth_config` and `server_config` are write-only. Responses expose `auth_configured: boolean` and `server_configured: boolean`, and never return raw credentials, command env, or server config.
 
 ##### `GET /v1/channels/{channel_id}/mcp-servers/`
 List MCP servers configured for a channel.
@@ -455,6 +467,7 @@ List MCP servers configured for a channel.
     "transport": "http",
     "auth_type": "bearer",
     "auth_configured": true,
+    "server_configured": false,
     "is_active": true,
     "created_at": "2026-06-15T00:00:00",
     "updated_at": "2026-06-15T00:00:00"
@@ -478,15 +491,29 @@ Add an MCP server to a channel.
 }
 ```
 
-**Response `201`:** MCP server object with `auth_configured`, without raw `auth_config`.
+**Stdio request:**
+```json
+{
+  "name": "Local Filesystem MCP",
+  "transport": "stdio",
+  "auth_type": "none",
+  "server_config": {
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/data"],
+    "env": {}
+  }
+}
+```
 
-**Errors:** `404` — Channel not found. `422` — Invalid URL, transport, auth type, or payload.
+**Response `201`:** MCP server object with `auth_configured` and `server_configured`, without raw `auth_config` or `server_config`.
+
+**Errors:** `404` — Channel not found. `422` — Invalid URL, transport, auth type, stdio config, or payload.
 
 ##### `GET /v1/channels/{channel_id}/mcp-servers/{server_id}`
 Get a single MCP server configuration.
 
 ##### `PATCH /v1/channels/{channel_id}/mcp-servers/{server_id}`
-Partial update. All fields are optional: `name`, `server_url`, `transport`, `auth_type`, `auth_config`, `is_active`.
+Partial update. All fields are optional: `name`, `server_url`, `transport`, `auth_type`, `auth_config`, `server_config`, `is_active`. Omit `auth_config` or `server_config` to preserve the existing stored value.
 
 ##### `DELETE /v1/channels/{channel_id}/mcp-servers/{server_id}`
 Delete an MCP server configuration. Returns `204`.

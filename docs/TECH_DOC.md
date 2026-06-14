@@ -822,23 +822,25 @@ MCP server configuration is persisted in `channel_mcp_servers`:
 |--------|---------|
 | `channel_id` | FK to `channels.id`; cascade-deleted with the channel |
 | `name` | Admin-facing display name |
-| `server_url` | HTTP/SSE endpoint URL |
-| `transport` | `sse` or `http` |
-| `auth_type` | `none`, `bearer`, or `custom_header` |
-| `auth_config` | JSONB credentials/config; never returned raw by API responses |
+| `server_url` | Remote endpoint URL for `sse`/`http`; nullable for `stdio` |
+| `transport` | `sse`, `http`, or `stdio` |
+| `auth_type` | `none`, `bearer`, or `custom_header`; stdio uses `none` |
+| `auth_config` | JSONB remote credentials/config; never returned raw by API responses |
+| `server_config` | JSONB stdio command/args/env/cwd; never returned raw by API responses |
 | `is_active` | Whether the server participates in tool discovery |
 
 One channel can have many MCP servers. All active servers for the selected channel are considered for each chat request.
 
-### 8.2 HTTP/SSE Client
+### 8.2 MCP Client Transports
 
 `app/services/mcp_http_client.py` wraps the official MCP Python SDK transports:
 
 - `sse_client(...)` for `transport = "sse"`
 - `streamable_http_client(...)` for `transport = "http"`
+- `stdio_client(StdioServerParameters(...))` for `transport = "stdio"`
 - `ClientSession` for initialize/list-tools/call-tool
 
-Authentication is converted to request headers before connecting:
+Remote transport authentication is converted to request headers before connecting:
 
 ```python
 # bearer
@@ -847,6 +849,19 @@ Authentication is converted to request headers before connecting:
 # custom_header
 {"X-Api-Key": "...", "X-Org": "..."}
 ```
+
+For stdio, `server_config` maps directly to `StdioServerParameters`:
+
+```json
+{
+  "command": "npx",
+  "args": ["-y", "@modelcontextprotocol/server-everything"],
+  "env": {},
+  "cwd": null
+}
+```
+
+Kirana does not invoke a shell for stdio servers; it passes the command and argument list to the MCP SDK. Required binaries/packages must be available in the backend host or deployment image. Because stdio launches local child processes, only trusted/admin-controlled MCP server commands should be configured. Secrets belong in `server_config.env`; raw env/config values are write-only and are not returned by API responses.
 
 Connections are intentionally short-lived. Kirana opens a connection to discover or execute a tool, then closes it, avoiding cross-channel state leakage and long-lived connection cleanup complexity.
 

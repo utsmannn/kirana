@@ -51,6 +51,7 @@ class ChatService:
                         transport=server.transport,
                         auth_type=server.auth_type,
                         auth_config=server.auth_config or {},
+                        server_config=server.server_config or {},
                     )
                     tools = await conn.list_tools()
                     for tool in tools:

@@ -1,4 +1,4 @@
-"""MCP HTTP/SSE client wrapper for per-channel MCP servers."""
+"""MCP client wrapper for per-channel MCP servers."""
 
 import logging
 from contextlib import asynccontextmanager
@@ -7,8 +7,9 @@ from urllib.parse import urlparse
 
 import httpx
 from anyio import EndOfStream
-from mcp import ClientSession
+from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
+from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
 logger = logging.getLogger(__name__)
@@ -42,19 +43,21 @@ def _format_mcp_error(error: BaseException) -> str:
 
 
 class McpHttpConnection:
-    """Connection to a single HTTP/SSE MCP server."""
+    """Connection to a single MCP server over SSE, streamable HTTP, or stdio."""
 
     def __init__(
         self,
-        server_url: str,
+        server_url: Optional[str],
         transport: str = "sse",
         auth_type: str = "none",
         auth_config: Optional[Dict[str, Any]] = None,
+        server_config: Optional[Dict[str, Any]] = None,
     ):
         self.server_url = server_url
         self.transport = transport.lower()
         self.auth_type = auth_type.lower()
         self.auth_config = auth_config or {}
+        self.server_config = server_config or {}
         self._headers = self._build_headers()
 
     def _build_headers(self) -> Dict[str, str]:
@@ -76,18 +79,48 @@ class McpHttpConnection:
             follow_redirects=True,
         )
 
+    def _stdio_params(self) -> StdioServerParameters:
+        command = self.server_config.get("command")
+        if not isinstance(command, str) or not command.strip():
+            raise ValueError("server_config.command is required for stdio MCP transport")
+
+        args = self.server_config.get("args") or []
+        if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+            raise ValueError("server_config.args must be a list of strings")
+
+        env = self.server_config.get("env")
+        if env is not None and (
+            not isinstance(env, dict)
+            or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items())
+        ):
+            raise ValueError("server_config.env must be an object with string keys and values")
+
+        cwd = self.server_config.get("cwd")
+        if cwd is not None and not isinstance(cwd, str):
+            raise ValueError("server_config.cwd must be a string")
+
+        return StdioServerParameters(
+            command=command,
+            args=args,
+            env=env,
+            cwd=cwd,
+        )
+
     @asynccontextmanager
     async def connect(self):
-        """Yield an initialized ClientSession over HTTP/SSE."""
-        parsed = urlparse(self.server_url)
-        if parsed.scheme not in ("http", "https"):
-            raise ValueError(f"Unsupported server URL scheme: {parsed.scheme}")
+        """Yield an initialized ClientSession over the configured MCP transport."""
+        if self.transport in ("sse", "http"):
+            if not self.server_url:
+                raise ValueError(f"server_url is required for MCP transport: {self.transport}")
+            parsed = urlparse(self.server_url)
+            if parsed.scheme not in ("http", "https"):
+                raise ValueError(f"Unsupported server URL scheme: {parsed.scheme}")
 
         if self.transport == "sse":
             async with sse_client(self.server_url, headers=self._headers) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
-                    logger.info("[MCP HTTP] Connected to %s via SSE", self.server_url)
+                    logger.info("[MCP] Connected to %s via SSE", self.server_url)
                     yield session
         elif self.transport == "http":
             client = self._httpx_client()
@@ -99,8 +132,15 @@ class McpHttpConnection:
                 ):
                     async with ClientSession(read, write) as session:
                         await session.initialize()
-                        logger.info("[MCP HTTP] Connected to %s via HTTP", self.server_url)
+                        logger.info("[MCP] Connected to %s via streamable HTTP", self.server_url)
                         yield session
+        elif self.transport == "stdio":
+            params = self._stdio_params()
+            async with stdio_client(params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    logger.info("[MCP] Connected to stdio server command=%s", params.command)
+                    yield session
         else:
             raise ValueError(f"Unsupported MCP transport: {self.transport}")
 
@@ -124,18 +164,22 @@ class McpHttpConnection:
     ) -> Dict[str, Any]:
         """Call a tool on the MCP server and normalize the result."""
         async with self.connect() as session:
-            logger.info("[MCP HTTP] Calling tool '%s' on %s", tool_name, self.server_url)
+            logger.info("[MCP] Calling tool '%s' via %s", tool_name, self.transport)
             result = await session.call_tool(tool_name, arguments=arguments)
 
             content_text = ""
+            structured_content = None
             for content in result.content:
                 if hasattr(content, "text"):
                     content_text += content.text
                 elif hasattr(content, "data"):
                     content_text += f"[Binary content: {len(content.data)} bytes]"
 
+            if hasattr(result, "structuredContent") and result.structuredContent:
+                structured_content = result.structuredContent
+
             logger.info(
-                "[MCP HTTP] Tool '%s' success=%s content_length=%d",
+                "[MCP] Tool '%s' success=%s content_length=%d",
                 tool_name,
                 not result.isError,
                 len(content_text),
@@ -144,18 +188,20 @@ class McpHttpConnection:
             return {
                 "success": not result.isError,
                 "content": content_text,
+                "structured_content": structured_content,
                 "is_error": result.isError,
             }
 
 
 async def test_mcp_connection(
-    server_url: str,
+    server_url: Optional[str],
     transport: str = "sse",
     auth_type: str = "none",
     auth_config: Optional[Dict[str, Any]] = None,
+    server_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Dry-run helper: connect, list tools, and return tool list without side effects."""
-    conn = McpHttpConnection(server_url, transport, auth_type, auth_config)
+    conn = McpHttpConnection(server_url, transport, auth_type, auth_config, server_config)
     try:
         tools = await conn.list_tools()
         return {
@@ -165,7 +211,7 @@ async def test_mcp_connection(
         }
     except Exception as e:
         message = _format_mcp_error(e)
-        logger.warning("[MCP HTTP] Test connection failed: %s", message)
+        logger.warning("[MCP] Test connection failed: %s", message)
         return {
             "success": False,
             "message": message,
