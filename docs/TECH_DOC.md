@@ -810,30 +810,92 @@ Unlike the old keyword-search implementation, this tool now uses the same pgvect
 
 ## 8. MCP Integration
 
-### 8.1 MCP Client
+Kirana is an MCP **consumer**. External products can expose Model Context Protocol servers, and Kirana can attach those servers to channels so their tools become available during chat.
 
-Kirana connects to Model Context Protocol (MCP) servers for extended capabilities:
+Kirana does not build product-specific tools (for example database tools) directly into this codebase. The external MCP server owns tool semantics, read/write/destructive behavior, and authorization. Kirana stores connection configuration, discovers tool schemas, passes credentials as configured, and delegates tool execution.
+
+### 8.1 Per-Channel Server Model
+
+MCP server configuration is persisted in `channel_mcp_servers`:
+
+| Column | Purpose |
+|--------|---------|
+| `channel_id` | FK to `channels.id`; cascade-deleted with the channel |
+| `name` | Admin-facing display name |
+| `server_url` | HTTP/SSE endpoint URL |
+| `transport` | `sse` or `http` |
+| `auth_type` | `none`, `bearer`, or `custom_header` |
+| `auth_config` | JSONB credentials/config; never returned raw by API responses |
+| `is_active` | Whether the server participates in tool discovery |
+
+One channel can have many MCP servers. All active servers for the selected channel are considered for each chat request.
+
+### 8.2 HTTP/SSE Client
+
+`app/services/mcp_http_client.py` wraps the official MCP Python SDK transports:
+
+- `sse_client(...)` for `transport = "sse"`
+- `streamable_http_client(...)` for `transport = "http"`
+- `ClientSession` for initialize/list-tools/call-tool
+
+Authentication is converted to request headers before connecting:
 
 ```python
-# app/services/mcp_client.py
+# bearer
+{"Authorization": f"Bearer {auth_config['token']}"}
 
-class MCPManager:
-    """Manages connections to MCP servers."""
-    
-    def get_available_servers(self) -> list[str]:
-        """Returns list of connected server names."""
-    
-    async def call_tool(self, tool_name: str, arguments: dict, server_name: str):
-        """Call a tool on an MCP server."""
+# custom_header
+{"X-Api-Key": "...", "X-Org": "..."}
 ```
 
-### 8.2 Z.AI MCP Server
+Connections are intentionally short-lived. Kirana opens a connection to discover or execute a tool, then closes it, avoiding cross-channel state leakage and long-lived connection cleanup complexity.
 
-Currently used for:
-- **Image analysis** (`analyze_image` tool via `image_analyzer_tool.py`)
-- **Web search** (optional)
+### 8.3 Tool Discovery and Request-Scoped Tool List
 
-Configure via environment:
+The chat request flow loads channel MCP tools before building the OpenAI-compatible tool list:
+
+```mermaid
+flowchart TD
+    Chat[Chat request with channel_id] --> Load[Load active channel_mcp_servers]
+    Load --> Connect[Connect to each MCP server]
+    Connect --> List[List tools via MCP]
+    List --> Adapt[Wrap as McpToolAdapter]
+    Adapt --> Merge[Merge with built-in user tools for this request]
+    Merge --> Complete[Provider chat completion with built-in + MCP tool schemas]
+    Complete --> Calls{Tool call?}
+    Calls -->|yes| Execute[Adapter calls originating MCP server]
+    Calls -->|no| Done[Return assistant response]
+```
+
+`app/tools/mcp_tool_adapter.py` converts each MCP tool definition to Kirana's `BaseTool` interface. The existing `BaseTool.to_openai_tool()` path then exposes it to providers using OpenAI-compatible function calling.
+
+MCP tools are kept request-scoped instead of being written into the global `tool_registry`. This preserves per-channel isolation even when two chat requests for different channels run at the same time.
+
+- Built-in user tools are read from `tool_registry`.
+- Active MCP tools for the selected channel are appended to a local `available_tools` list.
+- Built-in tool names win on collision.
+- Duplicate MCP tool names from multiple servers are skipped/logged.
+
+### 8.4 Admin/API Management
+
+Channel MCP servers are managed under:
+
+```text
+/v1/channels/{channel_id}/mcp-servers/
+```
+
+Supported operations:
+
+- list/create/get/update/delete
+- activate/deactivate
+- test connection and list discovered tools
+
+The admin frontend exposes the same operations from the channel list. The test action is a dry run: it connects to the server and lists tools without changing chat state.
+
+### 8.5 Existing Z.AI Integration
+
+The Z.AI integration remains separate from channel MCP servers. It is used by internal vision fallback/tooling such as `analyze_image` and is configured via:
+
 ```env
 ZAI_API_KEY=your-zai-api-key
 ```

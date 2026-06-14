@@ -4,6 +4,7 @@ from typing import Optional
 
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.orm import relationship
 
 from app.models.base import Base
 
@@ -31,3 +32,11 @@ class Channel(Base):
     embed_enabled = Column(Boolean, default=False, server_default="false")
     embed_token = Column(String(64), nullable=True, index=True)
     embed_config = Column(JSONB, default={}, server_default="{}")  # {"save_history": true, "public": true}
+
+    # MCP consumer configuration
+    mcp_servers = relationship(
+        "ChannelMcpServer",
+        backref="channel",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )

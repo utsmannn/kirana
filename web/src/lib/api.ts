@@ -769,6 +769,106 @@ export function searchFonts(query: string, token?: string, limit = 20): Promise<
 	return request(`/channels/fonts?${params}`, { token });
 }
 
+// ---------- Channel MCP Servers ----------
+
+export interface McpToolDefinition {
+	name: string;
+	description: string;
+	input_schema?: Record<string, unknown>;
+}
+
+export interface McpServer {
+	id: string;
+	channel_id: string;
+	name: string;
+	server_url: string;
+	transport: 'sse' | 'http';
+	auth_type: 'none' | 'bearer' | 'custom_header';
+	auth_configured: boolean;
+	is_active: boolean;
+	created_at?: string;
+	updated_at?: string;
+}
+
+export interface McpServerCreate {
+	name: string;
+	server_url: string;
+	transport?: 'sse' | 'http';
+	auth_type?: 'none' | 'bearer' | 'custom_header';
+	auth_config?: Record<string, unknown>;
+}
+
+export interface McpServerTestResponse {
+	success: boolean;
+	message: string;
+	tools: McpToolDefinition[];
+}
+
+export function getMcpServers(channelId: string, token?: string): Promise<McpServer[]> {
+	return request(`/channels/${channelId}/mcp-servers/`, { token });
+}
+
+export function getMcpServer(channelId: string, serverId: string, token?: string): Promise<McpServer> {
+	return request(`/channels/${channelId}/mcp-servers/${serverId}`, { token });
+}
+
+export function createMcpServer(
+	channelId: string,
+	data: McpServerCreate,
+	token?: string
+): Promise<McpServer> {
+	return request(`/channels/${channelId}/mcp-servers/`, {
+		method: 'POST',
+		token,
+		body: JSON.stringify(data)
+	});
+}
+
+export function updateMcpServer(
+	channelId: string,
+	serverId: string,
+	data: Partial<McpServerCreate>,
+	token?: string
+): Promise<McpServer> {
+	return request(`/channels/${channelId}/mcp-servers/${serverId}`, {
+		method: 'PATCH',
+		token,
+		body: JSON.stringify(data)
+	});
+}
+
+export function deleteMcpServer(channelId: string, serverId: string, token?: string): Promise<void> {
+	return request(`/channels/${channelId}/mcp-servers/${serverId}`, {
+		method: 'DELETE',
+		token
+	});
+}
+
+export function activateMcpServer(channelId: string, serverId: string, token?: string): Promise<McpServer> {
+	return request(`/channels/${channelId}/mcp-servers/${serverId}/activate`, {
+		method: 'POST',
+		token
+	});
+}
+
+export function deactivateMcpServer(channelId: string, serverId: string, token?: string): Promise<McpServer> {
+	return request(`/channels/${channelId}/mcp-servers/${serverId}/deactivate`, {
+		method: 'POST',
+		token
+	});
+}
+
+export function testMcpServer(
+	channelId: string,
+	serverId: string,
+	token?: string
+): Promise<McpServerTestResponse> {
+	return request(`/channels/${channelId}/mcp-servers/${serverId}/test`, {
+		method: 'POST',
+		token
+	});
+}
+
 // ---------- WebSocket Chat ----------
 
 export interface WsMessage {

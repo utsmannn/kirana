@@ -13,13 +13,23 @@
 		disableEmbed,
 		extractBrandStyle,
 		searchFonts,
+		getMcpServers,
+		createMcpServer,
+		updateMcpServer,
+		deleteMcpServer,
+		activateMcpServer,
+		deactivateMcpServer,
+		testMcpServer,
 		ApiError,
 		type Provider,
 		type Channel,
 		type Tool,
 		type ChannelCreate,
 		type ToolsResponse,
-		type EmbedConfigResponse
+		type EmbedConfigResponse,
+		type McpServer,
+		type McpServerCreate,
+		type McpServerTestResponse
 	} from '$lib/api';
 	import { adminToken } from '$lib/stores.svelte';
 	import { showToast } from '$lib/toast.svelte';
@@ -81,6 +91,24 @@
 	let fontSearchLoading = $state(false);
 	let showFontDropdown = $state(false);
 	let fontDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+	// MCP servers
+	let expandedMcpChannelId = $state<string | null>(null);
+	let mcpServers = $state<McpServer[]>([]);
+	let mcpLoading = $state(false);
+	let mcpSaving = $state(false);
+	let mcpTestingId = $state<string | null>(null);
+	let mcpTestResult = $state<McpServerTestResponse | null>(null);
+	let showMcpForm = $state(false);
+	let editingMcpServer = $state<McpServer | null>(null);
+	let mcpForm = $state<McpServerCreate>({
+		name: '',
+		server_url: '',
+		transport: 'sse',
+		auth_type: 'none',
+		auth_config: {}
+	});
+	let mcpAuthJson = $state('');
 
 	onMount(async () => {
 		if (!adminToken.value) {
@@ -377,6 +405,156 @@
 		}
 	}
 
+	async function toggleMcpSection(channelId: string) {
+		if (expandedMcpChannelId === channelId) {
+			expandedMcpChannelId = null;
+			return;
+		}
+		expandedMcpChannelId = channelId;
+		await loadMcpServers(channelId);
+	}
+
+	async function loadMcpServers(channelId: string) {
+		mcpLoading = true;
+		try {
+			mcpServers = await getMcpServers(channelId);
+		} catch (err) {
+			if (err instanceof ApiError) {
+				showToast(err.message, 'error');
+			}
+			mcpServers = [];
+		} finally {
+			mcpLoading = false;
+		}
+	}
+
+	function openMcpForm(server?: McpServer) {
+		editingMcpServer = server || null;
+		mcpForm = {
+			name: server?.name || '',
+			server_url: server?.server_url || '',
+			transport: server?.transport || 'sse',
+			auth_type: server?.auth_type || 'none',
+			auth_config: server?.auth_configured ? { token: '' } : {}
+		};
+		mcpAuthJson = server?.auth_configured
+			? JSON.stringify(mcpForm.auth_config, null, 2)
+			: server?.auth_type === 'bearer'
+				? '{\n  "token": ""\n}'
+				: '{\n  "headers": {\n    "X-Api-Key": ""\n  }\n}';
+		mcpTestResult = null;
+		showMcpForm = true;
+	}
+
+	function closeMcpForm() {
+		showMcpForm = false;
+		editingMcpServer = null;
+		mcpTestResult = null;
+	}
+
+	function parseMcpAuthConfig(): Record<string, unknown> | undefined {
+		if (mcpForm.auth_type === 'none') return undefined;
+		if (!mcpAuthJson.trim()) return undefined;
+		try {
+			return JSON.parse(mcpAuthJson);
+		} catch {
+			showToast('Auth config must be valid JSON', 'error');
+			return undefined;
+		}
+	}
+
+	async function handleSaveMcpServer() {
+		if (!expandedMcpChannelId) return;
+		if (!mcpForm.name || !mcpForm.server_url) {
+			showToast('Name and server URL are required', 'error');
+			return;
+		}
+
+		const authConfig = parseMcpAuthConfig();
+		if (authConfig === undefined && mcpForm.auth_type !== 'none') return;
+
+		mcpSaving = true;
+		try {
+			const data: McpServerCreate = {
+				name: mcpForm.name,
+				server_url: mcpForm.server_url,
+				transport: mcpForm.transport,
+				auth_type: mcpForm.auth_type,
+				auth_config: authConfig
+			};
+
+			if (editingMcpServer) {
+				await updateMcpServer(expandedMcpChannelId, editingMcpServer.id, data);
+				showToast('MCP server updated', 'success');
+			} else {
+				await createMcpServer(expandedMcpChannelId, data);
+				showToast('MCP server added', 'success');
+			}
+			closeMcpForm();
+			await loadMcpServers(expandedMcpChannelId);
+		} catch (err) {
+			if (err instanceof ApiError) {
+				showToast(err.message, 'error');
+			} else {
+				showToast('Failed to save MCP server', 'error');
+			}
+		} finally {
+			mcpSaving = false;
+		}
+	}
+
+	async function handleDeleteMcpServer(server: McpServer) {
+		if (!expandedMcpChannelId) return;
+		if (!confirm(`Delete MCP server "${server.name}"?`)) return;
+		try {
+			await deleteMcpServer(expandedMcpChannelId, server.id);
+			showToast('MCP server deleted', 'success');
+			await loadMcpServers(expandedMcpChannelId);
+		} catch (err) {
+			if (err instanceof ApiError) {
+				showToast(err.message, 'error');
+			}
+		}
+	}
+
+	async function handleToggleMcpServer(server: McpServer) {
+		if (!expandedMcpChannelId) return;
+		try {
+			if (server.is_active) {
+				await deactivateMcpServer(expandedMcpChannelId, server.id);
+				showToast('MCP server deactivated', 'success');
+			} else {
+				await activateMcpServer(expandedMcpChannelId, server.id);
+				showToast('MCP server activated', 'success');
+			}
+			await loadMcpServers(expandedMcpChannelId);
+		} catch (err) {
+			if (err instanceof ApiError) {
+				showToast(err.message, 'error');
+			}
+		}
+	}
+
+	async function handleTestMcpServer(server: McpServer) {
+		if (!expandedMcpChannelId) return;
+		mcpTestingId = server.id;
+		mcpTestResult = null;
+		try {
+			mcpTestResult = await testMcpServer(expandedMcpChannelId, server.id);
+			if (mcpTestResult.success) {
+				showToast(mcpTestResult.message, 'success');
+			} else {
+				showToast(mcpTestResult.message, 'error');
+			}
+		} catch (err) {
+			if (err instanceof ApiError) {
+				showToast(err.message, 'error');
+			}
+		} finally {
+			mcpTestingId = null;
+		}
+	}
+
 	function getEmbedUrl(): string {
 		const baseUrl = window.location.origin;
 		// Use embed_url from backend response if available, but always prepend host
@@ -503,6 +681,12 @@
 											>
 												Edit
 											</button>
+												<button
+													onclick={() => toggleMcpSection(channel.id)}
+													class="rounded-lg bg-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-600"
+												>
+													MCP
+												</button>
 											<button
 												onclick={() => openEmbedModal(channel)}
 												class="rounded-lg bg-indigo-600 px-3 py-1.5 text-sm text-white hover:bg-indigo-500"
@@ -520,6 +704,91 @@
 										</div>
 									</div>
 								</div>
+
+									{#if expandedMcpChannelId === channel.id}
+										<div class="mt-4 border-t border-zinc-700 pt-4">
+											<div class="mb-3 flex items-center justify-between">
+												<h3 class="text-sm font-medium text-zinc-300">MCP Servers</h3>
+												<button
+													onclick={() => openMcpForm()}
+													class="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs text-white hover:bg-indigo-500"
+												>
+													Add Server
+												</button>
+											</div>
+
+											{#if mcpLoading}
+												<p class="text-sm text-zinc-500">Loading MCP servers...</p>
+											{:else if mcpServers.length === 0}
+												<p class="text-sm text-zinc-500">No MCP servers configured for this channel.</p>
+											{:else}
+												<div class="space-y-2">
+													{#each mcpServers as server (server.id)}
+														<div class="rounded-lg border border-zinc-700 bg-zinc-800/50 p-3">
+															<div class="flex items-start justify-between gap-3">
+																<div class="min-w-0 flex-1">
+																	<p class="text-sm font-medium text-zinc-200">{server.name}</p>
+																	<p class="truncate text-xs text-zinc-500">{server.server_url}</p>
+																	<div class="mt-1 flex flex-wrap gap-2 text-xs">
+																		<span class="rounded bg-zinc-700 px-1.5 py-0.5 text-zinc-300">{server.transport}</span>
+																		<span class="rounded bg-zinc-700 px-1.5 py-0.5 text-zinc-300">{server.auth_type}</span>
+																		{#if server.auth_configured}
+																			<span class="rounded bg-emerald-600/20 px-1.5 py-0.5 text-emerald-400">auth</span>
+																		{/if}
+																		{#if server.is_active}
+																			<span class="rounded bg-emerald-600/20 px-1.5 py-0.5 text-emerald-400">active</span>
+																		{:else}
+																			<span class="rounded bg-zinc-700 px-1.5 py-0.5 text-zinc-400">inactive</span>
+																		{/if}
+																	</div>
+																</div>
+																<div class="flex shrink-0 gap-2">
+																	<button
+																		onclick={() => handleTestMcpServer(server)}
+																		disabled={mcpTestingId === server.id}
+																		class="rounded-lg bg-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-600 disabled:opacity-50"
+																	>
+																		{mcpTestingId === server.id ? 'Testing...' : 'Test'}
+																	</button>
+																	<button
+																		onclick={() => openMcpForm(server)}
+																		class="rounded-lg bg-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-600"
+																	>
+																		Edit
+																	</button>
+																	<button
+																		onclick={() => handleToggleMcpServer(server)}
+																		class="rounded-lg {server.is_active ? 'bg-amber-600/20 text-amber-400' : 'bg-emerald-600/20 text-emerald-400'} px-2 py-1 text-xs hover:opacity-80"
+																	>
+																		{server.is_active ? 'Deactivate' : 'Activate'}
+																	</button>
+																	<button
+																		onclick={() => handleDeleteMcpServer(server)}
+																		class="rounded-lg bg-zinc-800 px-2 py-1 text-xs text-red-400 hover:bg-zinc-700"
+																	>
+																		Delete
+																	</button>
+																</div>
+															</div>
+														</div>
+													{/each}
+												</div>
+											{/if}
+
+											{#if mcpTestResult}
+												<div class="mt-3 rounded-lg border {mcpTestResult.success ? 'border-emerald-700 bg-emerald-900/20' : 'border-red-700 bg-red-900/20'} p-3">
+													<p class="text-sm {mcpTestResult.success ? 'text-emerald-300' : 'text-red-300'}">{mcpTestResult.message}</p>
+													{#if mcpTestResult.tools.length > 0}
+														<ul class="mt-2 list-inside list-disc text-xs text-zinc-400">
+															{#each mcpTestResult.tools as tool}
+																<li>{tool.name}: {tool.description}</li>
+															{/each}
+														</ul>
+													{/if}
+												</div>
+											{/if}
+										</div>
+									{/if}
 							</div>
 						{/each}
 					</div>
@@ -640,6 +909,80 @@
 			<Button variant="secondary" onclick={() => (showChannelModal = false)}>Cancel</Button>
 			<Button onclick={handleSaveChannel} loading={saving}>
 				{editingChannel ? 'Update' : 'Create'}
+			</Button>
+		</div>
+	</div>
+</Modal>
+
+<!-- MCP Server Modal -->
+<Modal
+	open={showMcpForm}
+	onClose={closeMcpForm}
+	title={editingMcpServer ? 'Edit MCP Server' : 'Add MCP Server'}
+>
+	<div class="space-y-4">
+		<div>
+			<label class="block text-sm font-medium text-zinc-300">Name</label>
+			<input
+				type="text"
+				bind:value={mcpForm.name}
+				placeholder="e.g. Database MCP"
+				class="mt-1 block w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 focus:border-indigo-500 focus:outline-none"
+			/>
+		</div>
+
+		<div>
+			<label class="block text-sm font-medium text-zinc-300">Server URL</label>
+			<input
+				type="text"
+				bind:value={mcpForm.server_url}
+				placeholder="https://api.example.com/mcp"
+				class="mt-1 block w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 focus:border-indigo-500 focus:outline-none"
+			/>
+			<p class="mt-1 text-xs text-zinc-500">Must use http:// or https://</p>
+		</div>
+
+		<div class="grid grid-cols-2 gap-4">
+			<div>
+				<label class="block text-sm font-medium text-zinc-300">Transport</label>
+				<select
+					bind:value={mcpForm.transport}
+					class="mt-1 block w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 focus:border-indigo-500 focus:outline-none"
+				>
+					<option value="sse">SSE</option>
+					<option value="http">HTTP</option>
+				</select>
+			</div>
+
+			<div>
+				<label class="block text-sm font-medium text-zinc-300">Auth Type</label>
+				<select
+					bind:value={mcpForm.auth_type}
+					class="mt-1 block w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 focus:border-indigo-500 focus:outline-none"
+				>
+					<option value="none">None</option>
+					<option value="bearer">Bearer Token</option>
+					<option value="custom_header">Custom Header</option>
+				</select>
+			</div>
+		</div>
+
+		{#if mcpForm.auth_type !== 'none'}
+			<div>
+				<label class="block text-sm font-medium text-zinc-300">Auth Config (JSON)</label>
+				<textarea
+					bind:value={mcpAuthJson}
+					rows="4"
+					placeholder={'{ "token": "..." } or { "headers": { "X-Api-Key": "..." } }'}
+					class="mt-1 block w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 font-mono text-xs text-zinc-100 focus:border-indigo-500 focus:outline-none"
+				></textarea>
+			</div>
+		{/if}
+
+		<div class="flex justify-end gap-3 pt-4">
+			<Button variant="secondary" onclick={closeMcpForm}>Cancel</Button>
+			<Button onclick={handleSaveMcpServer} loading={mcpSaving}>
+				{editingMcpServer ? 'Update' : 'Add'}
 			</Button>
 		</div>
 	</div>

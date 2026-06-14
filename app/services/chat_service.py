@@ -11,12 +11,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models.channel import Channel
+from app.models.channel_mcp_server import ChannelMcpServer
 from app.models.conversation import ConversationLog
 from app.models.knowledge import Knowledge
 from app.models.provider import ProviderCredential
 from app.models.session import Session
 from app.schemas.chat import ChatCompletionRequest, ChatCompletionResponse
+from app.services.mcp_http_client import McpHttpConnection
 from app.services.rag_retrieval import retrieve_context
+from app.tools.base import BaseTool
+from app.tools.mcp_tool_adapter import McpToolAdapter
 from app.tools.registry import tool_registry
 
 logger = logging.getLogger(__name__)
@@ -25,6 +29,57 @@ logger = logging.getLogger(__name__)
 class ChatService:
     def __init__(self, db: AsyncSession):
         self.db = db
+
+    async def load_channel_mcp_tools(self, channel_id: str) -> List[McpToolAdapter]:
+        """Load active MCP tools for a channel without mutating the global registry."""
+        try:
+            result = await self.db.execute(
+                select(ChannelMcpServer).where(
+                    ChannelMcpServer.channel_id == channel_id,
+                    ChannelMcpServer.is_active.is_(True),
+                )
+            )
+            servers = result.scalars().all()
+            if not servers:
+                return []
+
+            adapters: List[McpToolAdapter] = []
+            for server in servers:
+                try:
+                    conn = McpHttpConnection(
+                        server_url=server.server_url,
+                        transport=server.transport,
+                        auth_type=server.auth_type,
+                        auth_config=server.auth_config or {},
+                    )
+                    tools = await conn.list_tools()
+                    for tool in tools:
+                        adapters.append(
+                            McpToolAdapter(
+                                connection=conn,
+                                name=tool["name"],
+                                description=tool["description"] or "MCP tool",
+                                parameters=tool["input_schema"] or {"type": "object", "properties": {}},
+                            )
+                        )
+                    logger.info(
+                        "[MCP SYNC] Channel %s server %s discovered %d tool(s)",
+                        channel_id,
+                        server.name,
+                        len(tools),
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[MCP SYNC] Failed to sync server '%s' for channel %s: %s",
+                        server.name,
+                        channel_id,
+                        e,
+                    )
+
+            return adapters
+        except Exception as e:
+            logger.warning("[MCP SYNC] Failed to load channel MCP tools: %s", e)
+            return []
 
     async def get_knowledge_context(self, query: str = "") -> str:
         """Get active knowledge as context. Optionally filter by query."""
@@ -40,7 +95,11 @@ class ChatService:
             context += f"--- {item.title} ---\n{item.content}\n"
         return context
 
-    async def build_system_prompt(self, channel: Optional[Channel] = None) -> str:
+    async def build_system_prompt(
+        self,
+        channel: Optional[Channel] = None,
+        available_tools: Optional[List[BaseTool]] = None,
+    ) -> str:
         """Build system prompt from channel config or global fallback."""
         # Check if context guard will be applied
         has_context = channel and channel.context
@@ -77,26 +136,38 @@ class ChatService:
         if channel and channel.personality_name and not has_context:
             prompt += f"\n\nYour name/personality is: {channel.personality_name}"
 
+        # Add available tools info to system prompt (only user-facing tools)
+        user_tools = available_tools if available_tools is not None else tool_registry.list_user_tools()
+        has_mcp_tools = any(isinstance(tool, McpToolAdapter) for tool in user_tools)
+
         # === CONTEXT GUARD INJECTION ===
-        # Priority: context > knowledge-only > unlimited
+        # Priority: context > knowledge/tools scope > unlimited
         if has_context:
-            # Strong context guard - limit AI to specific context
-            guard_prompt = self._build_context_guard(channel.context, channel.context_description)
+            # Strong context guard - limit AI to specific context, but allow channel MCP tools
+            # as authorized channel data sources.
+            guard_prompt = self._build_context_guard(
+                channel.context,
+                channel.context_description,
+                allow_channel_tools=has_mcp_tools,
+            )
             prompt = guard_prompt + "\n\n" + prompt
         elif channel:
-            # Check if knowledge exists for knowledge-only guard
+            # Check if knowledge exists for knowledge-only guard. If the channel has MCP tools,
+            # those tools are also valid sources and should not be blocked by the knowledge guard.
             has_knowledge = await self._check_knowledge_exists()
-            if has_knowledge:
-                guard_prompt = self._build_knowledge_only_guard()
+            if has_knowledge or has_mcp_tools:
+                guard_prompt = self._build_knowledge_only_guard(allow_channel_tools=has_mcp_tools)
                 prompt = guard_prompt + "\n\n" + prompt
 
-        # Add available tools info to system prompt (only user-facing tools)
-        user_tools = tool_registry.list_user_tools()
         if user_tools:
             prompt += "\n\nYou have access to the following tools:\n"
             for tool in user_tools:
                 prompt += f"- {tool.name}: {tool.description}\n"
-            prompt += "\nUse the tools when they would help answer the user's question."
+            prompt += (
+                "\nUse the tools when they would help answer the user's question. "
+                "Channel MCP tools are authorized data sources for this channel; "
+                "try them before saying information is unavailable when the question can be answered by a tool."
+            )
 
         # Branding — always appended.
         # Personality name overrides the default AI name.
@@ -114,7 +185,12 @@ class ChatService:
         )
         return result.scalar_one_or_none() is not None
 
-    def _build_context_guard(self, context: str, description: Optional[str] = None) -> str:
+    def _build_context_guard(
+        self,
+        context: str,
+        description: Optional[str] = None,
+        allow_channel_tools: bool = False,
+    ) -> str:
         """Build strong context guard prompt."""
         guard = f"""## IDENTITY & SCOPE
 
@@ -122,6 +198,11 @@ You are an assistant for: {context}"""
 
         if description:
             guard += f"\n\nDescription: {description}"
+
+        if allow_channel_tools:
+            guard += """
+
+Authorized channel MCP tools are part of this channel's approved data sources. Use them when they can answer channel-related questions that are not fully covered by the knowledge base."""
 
         guard += f"""
 
@@ -146,7 +227,8 @@ You are an assistant for: {context}"""
    - NEVER answer the question, even if the user insists
 
 4. If the question IS relevant to {context} but the specific information is NOT in the knowledge base:
-   - HONESTLY state that the information is not yet available in the system
+   - If channel tools are available and one may answer the question, use the tool first
+   - HONESTLY state that the information is not yet available in the system only after the knowledge base and relevant tools cannot answer it
    - NEVER fabricate information
    - Offer to help with other related questions
 
@@ -167,19 +249,29 @@ Always respond in the same language the user used in their query.
 
         return guard
 
-    def _build_knowledge_only_guard(self) -> str:
-        """Build knowledge-only guard prompt (when no context but knowledge exists)."""
-        return """## KNOWLEDGE SCOPE
+    def _build_knowledge_only_guard(self, allow_channel_tools: bool = False) -> str:
+        """Build knowledge/tool guard prompt (when scoped data sources exist)."""
+        if allow_channel_tools:
+            sources = "the knowledge base and channel MCP tools"
+            missing_rule = (
+                "If the question is not answerable from the knowledge base, use relevant "
+                "channel MCP tools before saying the information is unavailable."
+            )
+        else:
+            sources = "the knowledge base"
+            missing_rule = "If the question is not related to the knowledge base or the information is unavailable:"
 
-You have access to a knowledge base that has been provided.
+        return f"""## KNOWLEDGE AND TOOL SCOPE
+
+You have access to {sources} that have been provided for this channel.
 
 ## RULES:
 
 0. **IMPORTANT: You MUST always provide a response to EVERY question. NEVER stay silent or refuse to answer.**
 
-1. Prioritize answering based on information available in the knowledge base.
-2. If the question is NOT related to the knowledge base or the information is unavailable:
-   - HONESTLY state that the information is not available in the system
+1. Prioritize answering based on information available from {sources}.
+2. {missing_rule}
+   - HONESTLY state that the information is not available in the system only after checking relevant available sources
    - OFFER to help with other questions
    - NEVER fabricate information
 3. Stay friendly and helpful even when you cannot provide a specific answer.
@@ -195,10 +287,12 @@ Always respond in the same language the user used in their query.
 
     async def _execute_tool_calls(
         self,
-        tool_calls: List[Dict[str, Any]]
+        tool_calls: List[Dict[str, Any]],
+        available_tools: Optional[List[BaseTool]] = None,
     ) -> List[Dict[str, Any]]:
         """Execute tool calls and return results."""
         results = []
+        tools_by_name = {tool.name: tool for tool in (available_tools or tool_registry.list_tools())}
 
         for tool_call in tool_calls:
             tool_call_id = tool_call.get("id")
@@ -213,7 +307,7 @@ Always respond in the same language the user used in their query.
 
             logger.info("[TOOL] Executing tool '%s' with args: %s", tool_name, tool_args)
 
-            tool = tool_registry.get_tool(tool_name)
+            tool = tools_by_name.get(tool_name)
             if not tool:
                 logger.warning("[TOOL] Tool '%s' not found", tool_name)
                 results.append({
@@ -302,7 +396,7 @@ Always respond in the same language the user used in their query.
     async def _prepare_completion(
         self,
         request: ChatCompletionRequest,
-    ) -> Tuple[Dict[str, Any], Optional[Session], str, List[Dict[str, Any]]]:
+    ) -> Tuple[Dict[str, Any], Optional[Session], str, List[Dict[str, Any]], AsyncOpenAI, List[BaseTool]]:
         """Prepare completion kwargs and return session if applicable."""
         # Load session and channel if session_id provided
         session = None
@@ -329,6 +423,21 @@ Always respond in the same language the user used in their query.
                     )
                     channel = c_result.scalar_one_or_none()
 
+        # Load channel-scoped MCP tools locally for this request.
+        builtin_tools = tool_registry.list_user_tools()
+        mcp_tools: List[McpToolAdapter] = []
+        if channel:
+            mcp_tools = await self.load_channel_mcp_tools(str(channel.id))
+
+        available_tools: List[BaseTool] = list(builtin_tools)
+        seen_tool_names = {tool.name for tool in available_tools}
+        for tool in mcp_tools:
+            if tool.name in seen_tool_names:
+                logger.warning("[MCP SYNC] Skipping duplicate MCP tool name: %s", tool.name)
+                continue
+            available_tools.append(tool)
+            seen_tool_names.add(tool.name)
+
         # If no session but has channel_id and visitor_id (embed chat), create a new session
         # This allows embed chats to be saved to the database with unique visitor identification
         if not session and channel and request.visitor_id:
@@ -348,7 +457,7 @@ Always respond in the same language the user used in their query.
                 logger.info("[SESSION] Created new session for embed visitor: %s (channel: %s)", request.visitor_id[:8], channel.name)
 
         # Build system prompt with channel config
-        system_prompt = await self.build_system_prompt(channel)
+        system_prompt = await self.build_system_prompt(channel, available_tools=available_tools)
 
         latest_user_message = next(
             (msg.content for msg in reversed(request.messages) if msg.role == "user"),
@@ -366,7 +475,7 @@ Always respond in the same language the user used in their query.
                     system_prompt += (
                         "\n\n## KNOWLEDGE BASE CONTEXT\n"
                         "Use the following context as your primary source when answering. "
-                        "If information is not in the context, honestly say it is not available. "
+                        "If information is not in the context but a relevant channel MCP tool is available, use the tool before saying it is unavailable. "
                         "Cite [S1], [S2], etc. when relevant.\n\n"
                         f"{rag_result.context}"
                     )
@@ -450,13 +559,16 @@ Always respond in the same language the user used in their query.
 
         # Add tools if available and not disabled
         # Only pass user-facing tools to LLM (internal tools are for system use only)
-        user_tools = tool_registry.list_user_tools()
-        if user_tools:
-            completion_kwargs["tools"] = [tool.to_openai_tool() for tool in user_tools]
+        if available_tools:
+            completion_kwargs["tools"] = [tool.to_openai_tool() for tool in available_tools]
             completion_kwargs["tool_choice"] = request.tool_choice or "auto"
-            logger.info("[TOOL] Passing %d user-facing tools to LLM", len(user_tools))
+            logger.info(
+                "[TOOL] Passing %d user-facing tools to LLM: %s",
+                len(available_tools),
+                ", ".join(tool.name for tool in available_tools),
+            )
 
-        return completion_kwargs, session, model, messages, client
+        return completion_kwargs, session, model, messages, client, available_tools
 
     async def _save_conversation(
         self,
@@ -507,7 +619,7 @@ Always respond in the same language the user used in their query.
         request: ChatCompletionRequest,
     ) -> ChatCompletionResponse:
         """Create a chat completion with tool support."""
-        completion_kwargs, session, model, messages, client = await self._prepare_completion(request)
+        completion_kwargs, session, model, messages, client, available_tools = await self._prepare_completion(request)
 
         start_time = time.monotonic()
         try:
@@ -528,7 +640,7 @@ Always respond in the same language the user used in their query.
             tool_calls_dicts = [tc.model_dump() for tc in message.tool_calls]
 
             # Execute tools
-            tool_results = await self._execute_tool_calls(tool_calls_dicts)
+            tool_results = await self._execute_tool_calls(tool_calls_dicts, available_tools)
 
             # Build new messages with tool calls and results
             messages.append({
@@ -594,7 +706,7 @@ Always respond in the same language the user used in their query.
         Fully streaming: streams the first LLM call, intercepts tool_calls
         from the stream if any, executes tools, then streams the second call.
         """
-        completion_kwargs, session, model, messages, client = await self._prepare_completion(request)
+        completion_kwargs, session, model, messages, client, available_tools = await self._prepare_completion(request)
         completion_kwargs["stream"] = True
 
         start_time = time.monotonic()
@@ -629,14 +741,21 @@ Always respond in the same language the user used in their query.
                             tool_calls_accum[idx]["function"]["name"] += tc.function.name
                         if hasattr(tc.function, "arguments") and tc.function.arguments:
                             tool_calls_accum[idx]["function"]["arguments"] += tc.function.arguments
-                # Don't yield tool call chunks to client
+
+                    event = {
+                        "type": "tool_call_delta",
+                        "index": idx,
+                        "delta": tc.model_dump(exclude_none=True),
+                        "tool_call": tool_calls_accum[idx],
+                    }
+                    yield f"data: {json.dumps(event)}\n\n"
                 continue
 
             # Regular content - yield to client immediately
             chunk_content = delta.content or ""
             if chunk_content:
                 full_content += chunk_content
-                yield f"data: {json.dumps(chunk.model_dump())}\n\n"
+                yield f"data: {json.dumps(chunk.model_dump(exclude_none=True))}\n\n"
             # Skip chunks with only reasoning_content and no actual content
 
         # If LLM requested tool calls, execute and stream final answer
@@ -644,8 +763,32 @@ Always respond in the same language the user used in their query.
             tool_calls_list = [tool_calls_accum[i] for i in sorted(tool_calls_accum.keys())]
             logger.info("[TOOL STREAM] LLM requested %d tool calls", len(tool_calls_list))
 
+            for tool_call in tool_calls_list:
+                event = {
+                    "type": "tool_call_started",
+                    "tool_call_id": tool_call.get("id"),
+                    "name": tool_call.get("function", {}).get("name"),
+                    "arguments": tool_call.get("function", {}).get("arguments"),
+                }
+                yield f"data: {json.dumps(event)}\n\n"
+
             # Execute tools
-            tool_results = await self._execute_tool_calls(tool_calls_list)
+            tool_results = await self._execute_tool_calls(tool_calls_list, available_tools)
+
+            for tool_result in tool_results:
+                try:
+                    parsed_content = json.loads(tool_result.get('content') or '{}')
+                except json.JSONDecodeError:
+                    parsed_content = {'raw': tool_result.get('content')}
+
+                event_type = 'tool_call_failed' if parsed_content.get('error') or parsed_content.get('is_error') else 'tool_call_completed'
+                event = {
+                    "type": event_type,
+                    "tool_call_id": tool_result.get("tool_call_id"),
+                    "name": tool_result.get("name"),
+                    "result": parsed_content,
+                }
+                yield f"data: {json.dumps(event)}\n\n"
 
             # Build messages for second call
             messages.append({
@@ -670,7 +813,7 @@ Always respond in the same language the user used in their query.
                 chunk_content = chunk.choices[0].delta.content or ""
                 if chunk_content:
                     full_content += chunk_content
-                    yield f"data: {json.dumps(chunk.model_dump())}\n\n"
+                    yield f"data: {json.dumps(chunk.model_dump(exclude_none=True))}\n\n"
 
         yield "data: [DONE]\n\n"
 

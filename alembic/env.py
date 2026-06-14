@@ -9,6 +9,7 @@ from alembic import context
 from app.config import settings
 
 # Import specific models to ensure they are registered with Base
+from app.models import ChannelMcpServer  # noqa: F401
 from app.models.base import Base
 
 # this is the Alembic Config object, which provides
