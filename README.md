@@ -23,16 +23,16 @@ flowchart LR
 
 **Kirana is the middle layer.** Clients send plain HTTP requests. Kirana handles authentication, channel routing, tool execution, knowledge retrieval (RAG), and LLM communication.
 
-**Key difference from calling an LLM directly:** Kirana deterministically injects relevant knowledge base chunks into the LLM context before every request — the LLM always has the right information.
+**Key difference from calling an LLM directly:** Kirana deterministically injects relevant channel-scoped knowledge chunks into the LLM context before every request — the LLM always has the right channel context.
 
 ### Core Features
 
 | Feature | What it does |
 |---------|-------------|
-| **RAG Pipeline** | Documents → LiteParse → Chunk → Embed (FastEmbed 384d) → pgvector HNSW → Deterministic context injection |
+| **RAG Pipeline** | Channel documents → LiteParse → Chunk → Embed (FastEmbed 384d) → pgvector HNSW → deterministic channel-scoped context injection |
 | **Multi-Provider** | Configure OpenAI, Z.AI, or any OpenAI-compatible API. Switch per channel. |
 | **Channel System** | Each channel = provider + personality + tools + context guard. One server, unlimited use cases. |
-| **Tool Calling** | query_knowledge, get_current_datetime, image analysis (Z.AI Vision → LLM fallback), web search via MCP |
+| **Tool Calling** | Channel-scoped query_knowledge, get_current_datetime, image analysis (Z.AI Vision → LLM fallback), web search via MCP |
 | **Embed Widget** | Drop-in chat iframe with customizable theme and visitor isolation. |
 | **Streaming** | SSE streaming + buffer-based resume for reconnection. |
 | **Admin Panel** | SvelteKit dashboard at `/panel`. |
@@ -127,8 +127,8 @@ Open **http://localhost:8000/panel** for the admin dashboard.
 | Group | Key endpoints |
 |-------|--------------|
 | Chat | `POST /v1/chat/send` · `WS /v1/chat/ws` · `GET /v1/chat/stream/{id}` |
-| Knowledge | `POST /v1/knowledge/upload` · `GET/POST/PATCH/DELETE /v1/knowledge/` |
-| Channels | `GET/POST /v1/channels/` · `POST /v1/channels/{id}/embed` |
+| Knowledge | `POST /v1/channels/{channel_id}/knowledge/upload` · `GET/POST/PATCH/DELETE /v1/channels/{channel_id}/knowledge/` |
+| Channels | `GET/POST /v1/channels/` · `POST /v1/channels/{id}/embed` · per-channel knowledge management |
 | Providers | `GET/POST /v1/providers/` · `POST /v1/providers/{id}/activate` |
 | Sessions | `GET/POST /v1/sessions/` · `GET /v1/sessions/{id}/messages` |
 | Admin | `POST /v1/admin/login` |
@@ -171,16 +171,18 @@ Enable in admin panel: **Channels → Edit → Embed → Enable**.
 ## RAG — Knowledge Upload & Retrieval
 
 ```bash
-curl -X POST http://localhost:8000/v1/knowledge/upload \
+curl -X POST http://localhost:8000/v1/channels/<channel_id>/knowledge/upload \
   -H "Authorization: Bearer <token>" \
   -F "file=@handbook.pdf" -F "title=Employee Handbook"
 ```
 
 **Pipeline:** Upload → LiteParse → Chunk (tiktoken 800/120) → Embed (FastEmbed 384d) → pgvector HNSW
 
-**Upload is fire-and-forget.** `POST /v1/knowledge/upload` returns immediately with `"processing_status": "processing"`. Heavy work (parsing, vision, indexing) runs in the background. Poll `GET /v1/knowledge/{id}` — when `processing_status` becomes `"ready"` the document is indexed and queryable. Check `metadata.processing_error` if status is `"failed"`.
+**Upload is fire-and-forget.** `POST /v1/channels/{channel_id}/knowledge/upload` returns immediately with `"processing_status": "processing"`. Heavy work (parsing, vision, indexing) runs in the background. Poll `GET /v1/channels/{channel_id}/knowledge/{id}` — when `processing_status` becomes `"ready"` the document is indexed and queryable. Check `metadata.processing_error` if status is `"failed"`.
 
-**At query time:** User message → embed → cosine search → top-10 chunks → inject `[S1] [S2]` citations into system prompt → LLM responds with sourced answers.
+Knowledge is scoped per channel. RAG retrieval and the `query_knowledge` tool require the chat channel and do not fall back to global or unassigned knowledge.
+
+**At query time:** User message → channel-scoped embed search → top-10 chunks → inject `[S1] [S2]` citations into system prompt → LLM responds with sourced answers.
 
 RAG is **deterministic** — it runs before every chat request automatically.
 
@@ -306,7 +308,8 @@ See channel config in admin panel: **Channels → Edit → Context Guard**.
 
 ### RAG not retrieving
 - `RAG_ENABLED=true` in `.env`
-- Backfill pre-RAG knowledge: `python scripts/backfill_knowledge_chunks.py --only-active`
+- Backfill pre-RAG knowledge chunks if needed: `python scripts/backfill_knowledge_chunks.py --only-active`
+- Verify the knowledge item belongs to the same channel used by the chat request
 
 ### Upload not parsing
 - LiteParse handles PDF, DOCX, TXT, CSV; `.doc` → convert to `.docx` first

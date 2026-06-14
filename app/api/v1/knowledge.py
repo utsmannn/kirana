@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api import deps
 from app.config import settings
+from app.models.channel import Channel
 from app.models.knowledge import Knowledge
 from app.schemas.knowledge import (
     KnowledgeCreate,
@@ -39,15 +40,44 @@ except OSError:
     pass  # handled later during actual upload
 logger.info("[KNOWLEDGE] Upload directory: %s", UPLOAD_DIR)
 
+
+async def _get_channel_or_404(db: AsyncSession, channel_id: uuid.UUID) -> Channel:
+    result = await db.execute(select(Channel).where(Channel.id == channel_id))
+    channel = result.scalar_one_or_none()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    return channel
+
+
+async def _get_channel_knowledge_or_404(
+    db: AsyncSession,
+    channel_id: uuid.UUID,
+    knowledge_id: uuid.UUID,
+) -> Knowledge:
+    result = await db.execute(
+        select(Knowledge).where(
+            Knowledge.id == knowledge_id,
+            Knowledge.channel_id == channel_id,
+        )
+    )
+    knowledge = result.scalar_one_or_none()
+    if not knowledge:
+        raise HTTPException(status_code=404, detail="Knowledge item not found")
+    return knowledge
+
+
 @router.post(
     "/", response_model=KnowledgeResponse, status_code=status.HTTP_201_CREATED
 )
 async def create_knowledge(
+    channel_id: uuid.UUID,
     knowledge_in: KnowledgeCreate,
     auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db_session),
 ):
+    await _get_channel_or_404(db, channel_id)
     knowledge = Knowledge(
+        channel_id=channel_id,
         title=knowledge_in.title,
         content=knowledge_in.content,
         content_type=knowledge_in.content_type,
@@ -64,6 +94,7 @@ async def create_knowledge(
 
 @router.get("/", response_model=KnowledgeListResponse)
 async def list_knowledge(
+    channel_id: uuid.UUID,
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     search: Optional[str] = None,
@@ -72,7 +103,8 @@ async def list_knowledge(
     auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db_session),
 ):
-    query = select(Knowledge)
+    await _get_channel_or_404(db, channel_id)
+    query = select(Knowledge).where(Knowledge.channel_id == channel_id)
 
     if search:
         query = query.where(
@@ -113,32 +145,23 @@ async def list_knowledge(
 
 @router.get("/{knowledge_id}", response_model=KnowledgeResponse)
 async def get_knowledge(
+    channel_id: uuid.UUID,
     knowledge_id: uuid.UUID,
     auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db_session),
 ):
-    result = await db.execute(
-        select(Knowledge).where(Knowledge.id == knowledge_id)
-    )
-    knowledge = result.scalar_one_or_none()
-    if not knowledge:
-        raise HTTPException(status_code=404, detail="Knowledge item not found")
-    return knowledge
+    return await _get_channel_knowledge_or_404(db, channel_id, knowledge_id)
 
 
 @router.patch("/{knowledge_id}", response_model=KnowledgeResponse)
 async def update_knowledge(
+    channel_id: uuid.UUID,
     knowledge_id: uuid.UUID,
     knowledge_in: KnowledgeUpdate,
     auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db_session),
 ):
-    result = await db.execute(
-        select(Knowledge).where(Knowledge.id == knowledge_id)
-    )
-    knowledge = result.scalar_one_or_none()
-    if not knowledge:
-        raise HTTPException(status_code=404, detail="Knowledge item not found")
+    knowledge = await _get_channel_knowledge_or_404(db, channel_id, knowledge_id)
 
     update_data = knowledge_in.model_dump(exclude_unset=True)
     if "metadata" in update_data:
@@ -162,16 +185,12 @@ async def update_knowledge(
 
 @router.delete("/{knowledge_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_knowledge(
+    channel_id: uuid.UUID,
     knowledge_id: uuid.UUID,
     auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db_session),
 ):
-    result = await db.execute(
-        select(Knowledge).where(Knowledge.id == knowledge_id)
-    )
-    knowledge = result.scalar_one_or_none()
-    if not knowledge:
-        raise HTTPException(status_code=404, detail="Knowledge item not found")
+    knowledge = await _get_channel_knowledge_or_404(db, channel_id, knowledge_id)
 
     # Delete associated file if exists
     if knowledge.file_path and os.path.exists(knowledge.file_path):
@@ -184,6 +203,7 @@ async def delete_knowledge(
 
 @router.post("/upload", response_model=KnowledgeResponse, status_code=status.HTTP_201_CREATED)
 async def upload_knowledge_file(
+    channel_id: uuid.UUID,
     file: UploadFile = File(..., description="File to upload (PDF, DOCX, XLSX, PPTX, images, etc.)"),
     title: Optional[str] = Form(None, description="Title for the knowledge item"),
     auth: tuple = Depends(deps.verify_api_key_or_admin_token),
@@ -196,7 +216,7 @@ async def upload_knowledge_file(
     summarization, chunking, embedding) runs in the background via
     asyncio.create_task.
 
-    Poll GET /v1/knowledge/{id} and check extra_metadata.processing_status:
+    Poll GET /v1/channels/{channel_id}/knowledge/{id} and check processing_status:
       - "processing" → still running
       - "ready"      → done, content + chunks available
       - "failed"     → check extra_metadata.processing_error
@@ -204,6 +224,8 @@ async def upload_knowledge_file(
     import asyncio as _asyncio
 
     from app.services.knowledge_processor import process_upload
+
+    await _get_channel_or_404(db, channel_id)
 
     # ----- validate -----
     if not file.filename:
@@ -232,6 +254,7 @@ async def upload_knowledge_file(
 
     # ----- create Knowledge row immediately -----
     knowledge = Knowledge(
+        channel_id=channel_id,
         title=title or file.filename,
         content="",                                          # filled by background processor
         content_type=mime_type.split("/")[-1][:50],
@@ -263,11 +286,13 @@ async def upload_knowledge_file(
 
 @router.post("/scrape-web", response_model=WebScrapeResponse, status_code=status.HTTP_201_CREATED)
 async def scrape_web_url(
+    channel_id: uuid.UUID,
     request: WebScrapeRequest,
     auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db_session),
 ):
     """Scrape a single URL and create knowledge entry."""
+    await _get_channel_or_404(db, channel_id)
     logger.info("[WEB_SCRAPE] Scraping URL: %s", request.url)
 
     try:
@@ -285,6 +310,7 @@ async def scrape_web_url(
 
         # Create knowledge entry
         knowledge = Knowledge(
+            channel_id=channel_id,
             title=result.title,
             content=result.content,
             content_type="web",
@@ -325,11 +351,13 @@ async def scrape_web_url(
 
 @router.post("/crawl-web", response_model=WebCrawlResponse, status_code=status.HTTP_201_CREATED)
 async def crawl_web_site(
+    channel_id: uuid.UUID,
     request: WebCrawlRequest,
     auth: tuple = Depends(deps.verify_api_key_or_admin_token),
     db: AsyncSession = Depends(deps.get_db_session),
 ):
     """Crawl a website and create ONE combined knowledge entry with all pages."""
+    await _get_channel_or_404(db, channel_id)
     logger.info(
         "[WEB_CRAWL] Crawling %s (max_pages=%d, max_depth=%d)",
         request.url, request.max_pages, request.max_depth
@@ -374,6 +402,7 @@ async def crawl_web_site(
 
         # Create SINGLE knowledge entry
         knowledge = Knowledge(
+            channel_id=channel_id,
             title=main_title,
             content=combined_content,
             content_type="web",
@@ -422,20 +451,16 @@ async def crawl_web_site(
 
 @router.get("/{knowledge_id}/download")
 async def download_knowledge_file(
+    channel_id: uuid.UUID,
     knowledge_id: uuid.UUID,
     db: AsyncSession = Depends(deps.get_db_session),
     api_key: str = Depends(deps.verify_api_key_optional),
 ):
-    """Download the original file for a knowledge item.
+    """Download the original file for a channel knowledge item.
 
     Supports auth via Authorization header or api_key query parameter.
     """
-    result = await db.execute(
-        select(Knowledge).where(Knowledge.id == knowledge_id)
-    )
-    knowledge = result.scalar_one_or_none()
-    if not knowledge:
-        raise HTTPException(status_code=404, detail="Knowledge item not found")
+    knowledge = await _get_channel_knowledge_or_404(db, channel_id, knowledge_id)
 
     if not knowledge.file_path or not os.path.exists(knowledge.file_path):
         raise HTTPException(status_code=404, detail="File not found")

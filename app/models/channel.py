@@ -40,3 +40,4 @@ class Channel(Base):
         cascade="all, delete-orphan",
         lazy="selectin",
     )
+    knowledge = relationship("Knowledge", back_populates="channel")

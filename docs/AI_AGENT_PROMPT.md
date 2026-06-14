@@ -1,6 +1,6 @@
 # Kirana — AI Agent Guide
 
-Kirana is a production-ready AI chat platform with built-in RAG. It wraps AI providers (OpenAI, Z.AI, any OpenAI-compatible API) behind a **Provider → Channel → Session** architecture and deterministically injects knowledge base chunks into every chat request so the LLM always has the right context.
+Kirana is a production-ready AI chat platform with built-in RAG. It wraps AI providers (OpenAI, Z.AI, any OpenAI-compatible API) behind a **Provider → Channel → Session** architecture and deterministically injects channel-scoped knowledge base chunks into every chat request so the LLM always has the right context.
 
 Use this guide when an AI agent needs to install Kirana, understand its API surface, or build an integration on top of it.
 
@@ -295,12 +295,12 @@ All endpoints use `Authorization: Bearer <token>`. Four auth methods:
 |--------|-------------|-------|
 | Server API key | `KIRANA_API_KEY` from `.env` | All endpoints |
 | Admin token | `POST /v1/admin/login` | All endpoints (rotates daily) |
-| Client API key | `POST /v1/clients/` (one-time display) | Chat, knowledge, `/v1/clients/me` |
+| Client API key | `POST /v1/clients/` (one-time display) | Chat, channel knowledge, `/v1/clients/me` |
 | Embed token | Channel config | Chat only (per-channel) |
 
 ### Trailine Slashes
 
-- Collection endpoints **require** a trailing slash: `/v1/providers/`, `/v1/knowledge/`, `/v1/sessions/`, `/v1/clients/`
+- Collection endpoints **require** a trailing slash: `/v1/providers/`, `/v1/channels/{channel_id}/knowledge/`, `/v1/sessions/`, `/v1/clients/`
 - Singular endpoints must **not** have one: `/v1/clients/me`, `/v1/providers/{id}`, `/v1/channels/{id}`
 - Wrong slash → `307` redirect.
 
@@ -312,8 +312,8 @@ All endpoints use `Authorization: Bearer <token>`. Four auth methods:
 | `POST` | `/v1/admin/login` | Get admin token |
 | `POST` | `/v1/chat/send` | **Primary chat endpoint** — send messages, get responses |
 | `WS` | `/v1/chat/ws` | WebSocket chat |
-| `POST` | `/v1/knowledge/upload` | Upload documents for RAG |
-| `GET` | `/v1/knowledge/` | List/search knowledge items |
+| `POST` | `/v1/channels/{channel_id}/knowledge/upload` | Upload documents for that channel's RAG |
+| `GET` | `/v1/channels/{channel_id}/knowledge/` | List/search that channel's knowledge items |
 | `GET` | `/v1/channels/` | List channels |
 | `POST` | `/v1/sessions/` | Create a chat session |
 | `GET` | `/v1/sessions/{id}/messages` | Get conversation history |
@@ -355,7 +355,7 @@ Full API contract: [`docs/API_REFERENCE.md`](API_REFERENCE.md)
 ### Upload a document
 
 ```bash
-curl -X POST http://localhost:8000/v1/knowledge/upload \
+curl -X POST http://localhost:8000/v1/channels/<channel_id>/knowledge/upload \
   -H "Authorization: Bearer <token>" \
   -F "file=@document.pdf" \
   -F "title=Company Handbook"
@@ -375,25 +375,25 @@ Upload is **fire-and-forget** — returns `201` immediately with `"processing_st
 
 ```bash
 # Poll until status is "ready" or "failed"
-curl http://localhost:8000/v1/knowledge/<id> \
+curl http://localhost:8000/v1/channels/<channel_id>/knowledge/<id> \
   -H "Authorization: Bearer <token>" | python3 -c "import sys,json; print(json.load(sys.stdin)['processing_status'])"
 ```
 
 | Status | Meaning |
 |--------|---------|
 | `processing` | Background worker is still parsing/indexing — poll again in 2-3s |
-| `ready` | Document fully indexed and queryable via RAG |
+| `ready` | Document fully indexed and queryable via that channel's RAG |
 | `failed` | Check `metadata.processing_error` for the failure reason |
 
 ### How retrieval works at chat time
 
 1. User sends a chat message
 2. Kirana embeds the latest user message
-3. Searches `knowledge_chunks` via pgvector cosine similarity
-4. Injects top-10 most relevant chunks into the system prompt
+3. Searches `knowledge_chunks` via pgvector cosine similarity, filtered by the request channel
+4. Injects top-10 most relevant channel chunks into the system prompt
 5. LLM responds with `[S1]`, `[S2]` citations
 
-**RAG is deterministic** — it runs automatically before every chat request. The LLM doesn't decide whether to search.
+**RAG is deterministic and channel-scoped** — it runs automatically before every chat request and only retrieves knowledge for that chat channel. The LLM doesn't decide whether to search.
 
 ---
 
@@ -425,8 +425,8 @@ data: [DONE]
 2. GET  /v1/channels/             → pick a channel_id
 3. POST /v1/sessions/             → create session with channel_id
 4. POST /v1/chat/send             → chat with channel_id + session_id
-5. POST /v1/knowledge/upload      → add documents to RAG
-6. POST /v1/chat/send             → ask grounded questions
+5. POST /v1/channels/{channel_id}/knowledge/upload → add documents to that channel's RAG
+6. POST /v1/chat/send             → ask grounded questions with the same channel_id
 7. GET  /v1/sessions/{id}/messages → retrieve conversation history
 ```
 
@@ -448,7 +448,7 @@ All files are under `https://github.com/utsmannn/kirana`. Fetch them raw via `ht
 | 8 | `app/api/deps.py` | `raw.githubusercontent.com/utsmannn/kirana/main/app/api/deps.py` | Authentication dependency functions. |
 | 9 | `app/schemas/chat.py` | `raw.githubusercontent.com/utsmannn/kirana/main/app/schemas/chat.py` | Chat request/response Pydantic models. |
 | 10 | `app/services/chat_service.py` | `raw.githubusercontent.com/utsmannn/kirana/main/app/services/chat_service.py` | Chat orchestration: provider resolution, prompt building, RAG injection, streaming, error mapping. |
-| 11 | `app/api/v1/knowledge.py` | `raw.githubusercontent.com/utsmannn/kirana/main/app/api/v1/knowledge.py` | Knowledge CRUD, file upload, async processing, RAG indexing. |
+| 11 | `app/api/v1/knowledge.py` | `raw.githubusercontent.com/utsmannn/kirana/main/app/api/v1/knowledge.py` | Channel-scoped knowledge CRUD, file upload, async processing, RAG indexing. |
 | 12 | `app/core/security.py` | `raw.githubusercontent.com/utsmannn/kirana/main/app/core/security.py` | API key generation and SHA256 hashing. |
 | 13 | `docker-compose.yml` | `raw.githubusercontent.com/utsmannn/kirana/main/docker-compose.yml` | Infrastructure services (PostgreSQL/pgvector + Redis). |
 | 14 | `Dockerfile` | `raw.githubusercontent.com/utsmannn/kirana/main/Dockerfile` | Multi-stage production image build. |

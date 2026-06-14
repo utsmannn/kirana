@@ -1,4 +1,5 @@
 import logging
+import uuid
 from typing import Any, Dict
 
 from app.db.session import get_db
@@ -9,7 +10,10 @@ logger = logging.getLogger(__name__)
 
 
 class KnowledgeTool(BaseTool):
-    """Tool for querying knowledge base to retrieve relevant information."""
+    """Tool for querying channel-scoped knowledge base content."""
+
+    def __init__(self, channel_id: uuid.UUID | None = None):
+        self.channel_id = channel_id
 
     @property
     def name(self) -> str:
@@ -18,9 +22,9 @@ class KnowledgeTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Search the knowledge base for relevant information. "
+            "Search this channel's knowledge base for relevant information. "
             "Use this when you need to answer questions about specific topics, "
-            "retrieve facts, or access stored knowledge documents. "
+            "retrieve facts, or access stored channel knowledge documents. "
             "Returns relevant knowledge chunks with citations."
         )
 
@@ -31,7 +35,7 @@ class KnowledgeTool(BaseTool):
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search query to find relevant knowledge",
+                    "description": "Search query to find relevant channel knowledge",
                 },
                 "top_k": {
                     "type": "integer",
@@ -46,16 +50,29 @@ class KnowledgeTool(BaseTool):
         }
 
     async def execute(self, query: str, top_k: int = 3) -> Dict[str, Any]:
-        """Execute semantic knowledge retrieval and return relevant chunks."""
+        """Execute semantic channel knowledge retrieval and return relevant chunks."""
+        if self.channel_id is None:
+            return {
+                "found": False,
+                "query": query,
+                "results": [],
+                "message": "No channel knowledge scope is available for this request.",
+            }
+
         try:
             async for db in get_db():
-                result = await retrieve_context(db, query, top_k=min(max(top_k, 1), 10))
+                result = await retrieve_context(
+                    db,
+                    query,
+                    channel_id=self.channel_id,
+                    top_k=min(max(top_k, 1), 10),
+                )
                 if not result.chunks:
                     return {
                         "found": False,
                         "query": query,
                         "results": [],
-                        "message": "No relevant knowledge found for this query.",
+                        "message": "No relevant knowledge found in this channel for this query.",
                     }
 
                 return {
@@ -79,6 +96,6 @@ class KnowledgeTool(BaseTool):
             return {
                 "found": False,
                 "query": query,
-                "error": "Failed to query knowledge base",
+                "error": "Failed to query channel knowledge base",
                 "results": [],
             }

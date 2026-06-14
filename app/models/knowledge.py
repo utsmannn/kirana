@@ -16,6 +16,12 @@ class Knowledge(Base):
     __tablename__ = "knowledge"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    channel_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id"), nullable=True)
     title = Column(String(255), nullable=False)
     content = Column(Text, nullable=False)  # Extracted text content
@@ -43,5 +49,6 @@ class Knowledge(Base):
     created_at = Column(DateTime(timezone=True), default=_utcnow)
     updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
+    channel = relationship("Channel", back_populates="knowledge")
     client = relationship("Client", back_populates="knowledge")
     chunks = relationship("KnowledgeChunk", back_populates="knowledge", cascade="all, delete-orphan")

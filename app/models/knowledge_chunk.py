@@ -29,6 +29,12 @@ class KnowledgeChunk(Base):
         nullable=True,
         index=True,
     )
+    channel_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     title = Column(String(255), nullable=False)
     text = Column(Text, nullable=False)

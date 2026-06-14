@@ -393,6 +393,7 @@ export function getSessionMessages(id: string, token?: string): Promise<SessionM
 
 export interface KnowledgeItem {
 	id: string;
+	channel_id?: string | null;
 	title: string;
 	content: string;
 	content_type: string;
@@ -412,7 +413,8 @@ export interface KnowledgeItem {
 	[key: string]: unknown;
 }
 
-export function getKnowledge(
+export function getChannelKnowledge(
+	channelId: string,
 	token?: string,
 	page = 1,
 	limit = 20,
@@ -420,37 +422,40 @@ export function getKnowledge(
 ): Promise<PaginatedResponse<KnowledgeItem>> {
 	const params = new URLSearchParams({ page: String(page), limit: String(limit) });
 	if (search) params.set('search', search);
-	return request(`/knowledge/?${params}`, { token });
+	return request(`/channels/${channelId}/knowledge/?${params}`, { token });
 }
 
-export function createKnowledge(
+export function createChannelKnowledge(
+	channelId: string,
 	data: { title: string; content: string; content_type: string },
 	token?: string
 ): Promise<KnowledgeItem> {
-	return request('/knowledge/', {
+	return request(`/channels/${channelId}/knowledge/`, {
 		method: 'POST',
 		token,
 		body: JSON.stringify(data)
 	});
 }
 
-export function updateKnowledge(
+export function updateChannelKnowledge(
+	channelId: string,
 	id: string,
 	data: { title: string; content: string },
 	token?: string
 ): Promise<KnowledgeItem> {
-	return request(`/knowledge/${id}`, {
+	return request(`/channels/${channelId}/knowledge/${id}`, {
 		method: 'PATCH',
 		token,
 		body: JSON.stringify(data)
 	});
 }
 
-export function deleteKnowledge(id: string, token?: string): Promise<void> {
-	return request(`/knowledge/${id}`, { method: 'DELETE', token });
+export function deleteChannelKnowledge(channelId: string, id: string, token?: string): Promise<void> {
+	return request(`/channels/${channelId}/knowledge/${id}`, { method: 'DELETE', token });
 }
 
-export function uploadKnowledgeFile(
+export function uploadChannelKnowledgeFile(
+	channelId: string,
 	file: File,
 	title?: string,
 	token?: string
@@ -461,7 +466,7 @@ export function uploadKnowledgeFile(
 		formData.append('title', title);
 	}
 
-	return request('/knowledge/upload', {
+	return request(`/channels/${channelId}/knowledge/upload`, {
 		method: 'POST',
 		token,
 		body: formData
@@ -489,18 +494,20 @@ export interface WebCrawlResponse {
 	errors: string[];
 }
 
-export function scrapeWebUrl(
+export function scrapeChannelWebUrl(
+	channelId: string,
 	url: string,
 	token?: string
 ): Promise<WebScrapeResponse> {
-	return request('/knowledge/scrape-web', {
+	return request(`/channels/${channelId}/knowledge/scrape-web`, {
 		method: 'POST',
 		token,
 		body: JSON.stringify({ url })
 	});
 }
 
-export function crawlWebsite(
+export function crawlChannelWebsite(
+	channelId: string,
 	url: string,
 	token?: string,
 	options?: {
@@ -509,7 +516,7 @@ export function crawlWebsite(
 		path_prefix?: string;
 	}
 ): Promise<WebCrawlResponse> {
-	return request('/knowledge/crawl-web', {
+	return request(`/channels/${channelId}/knowledge/crawl-web`, {
 		method: 'POST',
 		token,
 		body: JSON.stringify({

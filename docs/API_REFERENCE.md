@@ -18,7 +18,7 @@ Kirana is an AI chat platform with built-in RAG. It exposes a Kirana-native chat
 | `app/api/deps.py` | Every auth dependency and how they compose |
 | `app/schemas/chat.py` | Chat request/response Pydantic models |
 | `app/services/chat_service.py` | Chat orchestration logic (prompt building, RAG injection, LLM call) |
-| `app/api/v1/knowledge.py` | Knowledge CRUD + file upload + RAG indexing pipeline |
+| `app/api/v1/knowledge.py` | Channel-scoped knowledge CRUD + file upload + RAG indexing pipeline |
 | `app/services/rag_retrieval.py` | Vector search and context formatting |
 | `app/config.py` | All settings with defaults (env vars → Pydantic Settings) |
 | `app/core/security.py` | API key generation (SHA256 hashing) |
@@ -27,7 +27,7 @@ Kirana is an AI chat platform with built-in RAG. It exposes a Kirana-native chat
 - A **Provider** is an AI API credential (OpenAI, Z.AI, or any OpenAI-compatible endpoint).
 - A **Channel** binds a provider to a personality, system prompt, tools, and context guard. One provider → many channels.
 - A **Session** is one conversation thread under a channel.
-- **RAG is deterministic** — relevant knowledge chunks are injected into every chat request automatically. The LLM doesn't decide whether to search.
+- **RAG is deterministic and channel-scoped** — relevant knowledge chunks from the resolved channel are injected into every chat request automatically. The LLM doesn't decide whether to search.
 
 ---
 
@@ -122,7 +122,7 @@ FastAPI enforces strict trailing slash behavior based on route definition:
 | `@router.get("/me")` | ✅ 200 | **307 redirect** |
 | `@router.get("/{id}")` | ✅ 200 | **307 redirect** |
 
-**AI agent rule:** Collection endpoints require trailing slash (`/providers/`, `/channels/`, `/sessions/`, `/knowledge/`, `/clients/`). Singular endpoints (`/me`, `/{id}`) must NOT have a trailing slash.
+**AI agent rule:** Collection endpoints require trailing slash (`/providers/`, `/channels/`, `/sessions/`, `/channels/{channel_id}/knowledge/`, `/clients/`). Singular endpoints (`/me`, `/{id}`) must NOT have a trailing slash.
 
 ---
 
@@ -269,7 +269,7 @@ For streaming requests, these are sent as SSE `error` payloads before `[DONE]`.
 2. Channel resolved (from `channel_id` or default)
 3. Provider credentials loaded from channel
 4. System prompt built (personality + context guard + tool definitions)
-5. **RAG context retrieved** (embeds user query → pgvector search → formats `[S1]`, `[S2]` citations)
+5. **Channel-scoped RAG context retrieved** (embeds user query → pgvector search filtered by channel → formats `[S1]`, `[S2]` citations)
 6. RAG context injected into system prompt (deterministic, not tool-based)
 7. LLM called via OpenAI SDK using channel's provider
 8. Response returned or streamed
@@ -726,10 +726,12 @@ Get conversation history for a session. Messages are ordered by `created_at` asc
 
 ### Knowledge Base (RAG)
 
+Knowledge is scoped per channel. There is no general/global knowledge API; create, list, poll, download, and delete knowledge through the channel path so RAG and `query_knowledge` cannot leak data across channels.
+
 All endpoints auth: Server API key or Admin token.
 
-#### `POST /v1/knowledge/`
-Create a text knowledge item. Triggers chunking → embedding → pgvector indexing.
+#### `POST /v1/channels/{channel_id}/knowledge/`
+Create a text knowledge item for one channel. Triggers chunking → embedding → pgvector indexing.
 
 **Request (`KnowledgeCreate`):**
 ```json
@@ -737,35 +739,32 @@ Create a text knowledge item. Triggers chunking → embedding → pgvector index
   "title": "FAQ",
   "content": "Our return policy is 30 days...",
   "content_type": "text",
-  "source_type": "manual",
-  "source_url": null,
-  "is_active": true,
   "metadata": {}
 }
 ```
 
-**Response `201`:** Knowledge object with `id`.
+**Response `201`:** Knowledge object with `id` and `channel_id`.
 
-#### `GET /v1/knowledge/?page=1&limit=20&search=<query>&is_active=true&source_type=<type>`
-Paginated list with optional search and filters.
+#### `GET /v1/channels/{channel_id}/knowledge/?page=1&limit=20&search=<query>&is_active=true`
+Paginated list of knowledge for that channel only.
 
-#### `GET /v1/knowledge/{knowledge_id}`
-Get single knowledge item.
+#### `GET /v1/channels/{channel_id}/knowledge/{knowledge_id}`
+Get a single channel knowledge item. Returns `404` if the item exists in another channel.
 
-#### `PATCH /v1/knowledge/{knowledge_id}`
-Partial update. Changing `title` or `content` triggers **re-indexing** (delete old chunks → re-chunk → re-embed → re-store).
+#### `PATCH /v1/channels/{channel_id}/knowledge/{knowledge_id}`
+Partial update. Changing `title`, `content`, `content_type`, `metadata`, or `is_active` triggers **re-indexing** for that channel.
 
-#### `DELETE /v1/knowledge/{knowledge_id}`
-Deletes knowledge item + all associated chunks (cascade). Also deletes the uploaded file from disk if present. Returns `204`.
+#### `DELETE /v1/channels/{channel_id}/knowledge/{knowledge_id}`
+Deletes the channel knowledge item + all associated chunks (cascade). Also deletes the uploaded file from disk if present. Returns `204`.
 
-#### `POST /v1/knowledge/upload`
-Upload a file for RAG processing. Multipart form data.
+#### `POST /v1/channels/{channel_id}/knowledge/upload`
+Upload a file for channel-scoped RAG processing. Multipart form data.
 
 **Request:** `multipart/form-data`
 - `file`: The file (required)
 - `title`: Display title (optional, defaults to filename)
 
-**This endpoint is fire-and-forget.** It returns immediately with `processing_status: "processing"`. Heavy work (parsing, chunking, embedding, indexing) runs in the background. Poll `GET /v1/knowledge/{id}` until `processing_status` becomes `"ready"` or `"failed"`.
+**This endpoint is fire-and-forget.** It returns immediately with `processing_status: "processing"`. Heavy work (parsing, chunking, embedding, indexing) runs in the background. Poll `GET /v1/channels/{channel_id}/knowledge/{id}` until `processing_status` becomes `"ready"` or `"failed"`.
 
 **Processing pipeline (runs in background):**
 1. File saved to `UPLOAD_DIR/knowledge/<uuid>_<ext>`
@@ -775,8 +774,8 @@ Upload a file for RAG processing. Multipart form data.
 5. Text stored in `Knowledge.content`
 6. **Chunking** (tiktoken cl100k_base, 800 tokens, 120 overlap)
 7. **Embedding** (FastEmbed, 384-dim, batch size 32)
-8. **pgvector insert** with HNSW index
-9. Status updated to `"ready"` — document is now queryable via RAG
+8. **pgvector insert** with `channel_id` copied to every chunk
+9. Status updated to `"ready"` — document is now queryable by that channel only
 
 **Supported formats:**
 
@@ -793,11 +792,11 @@ Upload a file for RAG processing. Multipart form data.
 ```json
 {
   "id": "550e8400-...",
+  "channel_id": "8b807f84-...",
   "title": "handbook.pdf",
   "content": "",
   "content_type": "pdf",
   "source_type": "upload",
-  "file_path": "/app/uploads/knowledge/abc123_handbook.pdf",
   "file_name": "handbook.pdf",
   "file_size": 1024000,
   "mime_type": "application/pdf",
@@ -813,38 +812,11 @@ Upload a file for RAG processing. Multipart form data.
 }
 ```
 
-**Response `200` from `GET /v1/knowledge/{id}` after processing completes:**
-```json
-{
-  "id": "550e8400-...",
-  "title": "handbook.pdf",
-  "content": "## Summary\nThis handbook covers...\n\n---\n\n## Original Document\n\nFull extracted text...",
-  "content_type": "pdf",
-  "source_type": "upload",
-  "file_path": "/app/uploads/knowledge/abc123_handbook.pdf",
-  "file_name": "handbook.pdf",
-  "file_size": 1024000,
-  "mime_type": "application/pdf",
-  "is_active": true,
-  "processing_status": "ready",
-  "metadata": {
-    "analysis_method": "liteparse_ai_analyze",
-    "analysis_success": true,
-    "parser": "liteparse",
-    "pages": 42,
-    "extracted_length": 45210,
-    "original_filename": "handbook.pdf"
-  },
-  "has_file": true,
-  "created_at": "2025-01-01T00:00:00"
-}
-```
-
 **Polling pattern (recommended):**
 ```
-POST /v1/knowledge/upload  →  201 { processing_status: "processing" }
+POST /v1/channels/{channel_id}/knowledge/upload  →  201 { processing_status: "processing" }
 loop:
-  GET /v1/knowledge/{id}   →  check processing_status
+  GET /v1/channels/{channel_id}/knowledge/{id}   →  check processing_status
   if "ready"   → done, content + chunks available
   if "failed"  → check metadata.processing_error
   if "processing" → wait 2-3s, poll again
@@ -855,43 +827,21 @@ loop:
 | Status | Meaning | What to do |
 |--------|---------|------------|
 | `"processing"` | Background worker is parsing/indexing | Poll again in 2-3 seconds |
-| `"ready"` | Document is fully indexed | Chunks are queryable via RAG |
+| `"ready"` | Document is fully indexed | Chunks are queryable via that channel's RAG |
 | `"failed"` | Processing error | Read `metadata.processing_error` for the failure reason |
 
-**Errors:** `400` — File too large (max 50MB) or unsupported type.
+**Errors:** `400` — File too large (max 50MB) or unsupported type. `404` — Channel or channel knowledge item not found.
 
-#### `POST /v1/knowledge/scrape-web`
-Scrape a single URL into knowledge.
+#### `POST /v1/channels/{channel_id}/knowledge/scrape-web`
+Scrape a single URL into channel knowledge.
 
-**Request:**
-```json
-{
-  "url": "https://example.com/page",
-  "title": "Optional Title"
-}
-```
+#### `POST /v1/channels/{channel_id}/knowledge/crawl-web`
+Crawl a website into one combined channel knowledge entry.
 
-**Response `200`:** Knowledge object (same shape as upload).
+#### `GET /v1/channels/{channel_id}/knowledge/{knowledge_id}/download`
+Auth: Server API key or Admin token (header or `?api_key=` query param).
 
-#### `POST /v1/knowledge/crawl-web`
-Crawl an entire website (same domain only).
-
-**Request:**
-```json
-{
-  "url": "https://example.com",
-  "max_pages": 10
-}
-```
-
-**Response `200`:** Knowledge object with combined crawl content.
-
-#### `GET /v1/knowledge/{knowledge_id}/download`
-Auth: Server API key or Admin token (via `verify_api_key_optional` — header or `?api_key=` query param).
-
-Download the original uploaded file. Returns `FileResponse` with appropriate content type.
-
-**Errors:** `404` — Knowledge not found or no file attached.
+Download the original uploaded file. Returns `FileResponse` with appropriate content type. Returns `404` if the item belongs to another channel.
 
 ---
 
@@ -1026,15 +976,11 @@ Get a specific personality template by slug.
 Auth: Server API key or Admin token.
 
 #### `GET /v1/tools/`
-List user-facing tools (excludes internal-only tools).
+List globally registered user-facing tools (excludes internal-only tools). Channel-scoped tools such as `query_knowledge` and MCP tools are assembled per chat request and may not appear in this global list.
 
 ```json
 {
   "tools": [
-    {
-      "name": "query_knowledge",
-      "description": "Search the knowledge base for relevant information"
-    },
     {
       "name": "get_current_datetime",
       "description": "Get the current date and time"
@@ -1044,19 +990,21 @@ List user-facing tools (excludes internal-only tools).
 ```
 
 #### `POST /v1/tools/execute`
-Execute a tool directly (without going through chat).
+Execute a globally registered tool directly (without going through chat).
+
+Do not use this endpoint for `query_knowledge`: that tool requires a chat channel scope and is only exposed inside channel chat requests. Use `POST /v1/chat/send` with `channel_id` so Kirana can inject RAG context and expose the request-scoped `query_knowledge` tool safely.
 
 **Request:**
 ```json
 {
-  "tool": "query_knowledge",
+  "tool": "get_current_datetime",
   "arguments": {
-    "query": "return policy"
+    "timezone": "Asia/Jakarta"
   }
 }
 ```
 
-**Errors:** `404` — Tool not found. `400` — Invalid arguments.
+**Errors:** `404` — Tool not found or not globally executable. `400` — Invalid arguments.
 
 ---
 
@@ -1084,9 +1032,9 @@ Usage statistics endpoint. Returns token usage, request counts, etc.
 ### Flow 2: Knowledge → RAG → Chat
 
 ```
-1. POST /v1/knowledge/upload     → returns immediately (201, processing_status: "processing")
-2. GET  /v1/knowledge/{id}       → poll until processing_status is "ready"
-3. POST /v1/chat/send            → ask question with channel_id (RAG automatically injects relevant chunks)
+1. POST /v1/channels/{channel_id}/knowledge/upload → returns immediately (201, processing_status: "processing")
+2. GET  /v1/channels/{channel_id}/knowledge/{id}   → poll until processing_status is "ready"
+3. POST /v1/chat/send                            → ask question with the same channel_id (RAG injects that channel's chunks)
 4. Response includes [S1], [S2] citations
 ```
 
@@ -1187,7 +1135,7 @@ When `RATE_LIMIT_ENABLED=true`, requests are limited per client IP:
 
 ## Idempotency
 
-- **Knowledge upload:** `POST /v1/knowledge/upload` is **fire-and-forget** — returns `201` with `processing_status: "processing"`. Heavy work runs async. Poll `GET /v1/knowledge/{id}` for completion. Repeated uploads of the same file create duplicate items.
+- **Knowledge upload:** `POST /v1/channels/{channel_id}/knowledge/upload` is **fire-and-forget** — returns `201` with `processing_status: "processing"`. Heavy work runs async. Poll `GET /v1/channels/{channel_id}/knowledge/{id}` for completion. Repeated uploads of the same file create duplicate items.
 - **Knowledge updates:** `PATCH` triggers re-indexing each time (delete old chunks + re-chunk + re-embed). Avoid unnecessary updates.
 - **Client registration:** `POST /v1/clients/` is idempotent by email — returns `400` if email already registered.
 - **Channel/provider CRUD:** Standard REST semantics. `PUT` not supported; use `PATCH` for partial updates.
@@ -1205,14 +1153,14 @@ When `RATE_LIMIT_ENABLED=true`, requests are limited per client IP:
 
 ## RAG Behavior Notes for AI Agents
 
-- **RAG is deterministic, not tool-based.** The system always retrieves and injects relevant chunks before every chat request. The LLM does not decide whether to search.
-- **The `query_knowledge` tool** is an additional explicit search path, not the primary RAG mechanism.
+- **RAG is deterministic, not tool-based.** The system retrieves and injects relevant chunks from the resolved chat channel before every chat request. The LLM does not decide whether to search.
+- **The `query_knowledge` tool** is an additional explicit search path scoped to the same chat channel, not the primary RAG mechanism.
 - **Retrieval query** is built from the latest user message + optional channel context.
 - **Results are bounded:** Top-10 chunks, max 12,000 characters total.
 - **Citations** use `[S1]`, `[S2]` format. Each citation maps to a specific chunk with provenance (page number, bbox coordinates, source document).
-- **If no relevant chunks found:** No RAG context is injected. The LLM answers from its training data.
+- **If no relevant channel chunks are found:** No RAG context is injected. The LLM answers from its training data and/or authorized channel MCP tools.
 - **Re-indexing:** Updating knowledge content/title via `PATCH` triggers full re-indexing. The old chunks are deleted first, then new ones created.
-- **Backfill:** Knowledge items created before the pgvector migration need `python scripts/backfill_knowledge_chunks.py --only-active`.
+- **Backfill:** Legacy knowledge is assigned to the default/oldest channel by the channel-scope migration when channels exist. Older pre-pgvector items may still need `python scripts/backfill_knowledge_chunks.py --only-active`.
 
 ---
 
@@ -1242,7 +1190,7 @@ When analyzing this codebase, read files in this order:
 4. **`app/schemas/chat.py`** — Chat request/response models
 5. **`app/api/v1/chat.py`** — Chat endpoint implementation
 6. **`app/services/chat_service.py`** — Chat orchestration (prompt building, RAG injection, LLM call)
-7. **`app/api/v1/knowledge.py`** — Knowledge CRUD + upload pipeline
+7. **`app/api/v1/knowledge.py`** — Channel-scoped knowledge CRUD + upload pipeline
 8. **`app/services/rag_retrieval.py`** — Vector search + context formatting
 9. **`app/services/rag_ingestion.py`** — Parse → chunk → embed → store pipeline
 10. **`app/config.py`** — All settings with defaults

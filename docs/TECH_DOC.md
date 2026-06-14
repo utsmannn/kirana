@@ -103,13 +103,13 @@ flowchart TB
 
 ### 2.1 Architecture
 
-Kirana uses **deterministic RAG**, not tool-based. The knowledge retrieval happens automatically before every chat completion — the LLM doesn't decide whether to search.
+Kirana uses **deterministic, channel-scoped RAG**, not tool-based. Knowledge retrieval happens automatically before every chat completion for the resolved channel only — the LLM doesn't decide whether to search.
 
 **Write path — Knowledge ingestion:**
 
 ```mermaid
 flowchart TD
-    UP[Document Upload] --> FS[File Saved<br/>→ /uploads/knowledge/uuid.ext]
+    UP[Channel Document Upload<br/>/channels/{id}/knowledge/upload] --> FS[File Saved<br/>→ /uploads/knowledge/uuid.ext]
     FS --> PA
 
     subgraph PA[Parse]
@@ -140,7 +140,7 @@ flowchart TD
     subgraph ST[Store — INSERT INTO knowledge_chunks]
         TXT[text, chunk_index, token_count]
         VEC[embedding VECTOR 384]
-        META[extra_metadata JSONB — provenance]
+        META[channel_id + extra_metadata JSONB — provenance]
     end
 
     EM --> ST
@@ -156,7 +156,7 @@ flowchart TD
 
     EQ[Embed Query<br/>Same FastEmbed model, 384-dim] --> VS
 
-    VS[Vector Search<br/>SELECT FROM knowledge_chunks<br/>JOIN knowledge — active rows only<br/>ORDER BY embedding <=> query_vector<br/>LIMIT RAG_TOP_K × 2 — oversample] --> DT
+    VS[Vector Search<br/>SELECT FROM knowledge_chunks<br/>JOIN knowledge — active rows<br/>WHERE channel_id = chat channel<br/>ORDER BY embedding <=> query_vector<br/>LIMIT RAG_TOP_K × 2 — oversample] --> DT
 
     DT[Deduplicate + Truncate<br/>One chunk per knowledge_id<br/>Cap to RAG_TOP_K — 10 chunks<br/>Cap to RAG_MAX_CONTEXT_CHARS — 12k] --> FC
 
@@ -223,9 +223,9 @@ results = (
 The retrieved context is formatted and injected into the system prompt:
 
 ```
-## KNOWLEDGE BASE CONTEXT
-Use the following context as your primary source when answering.
-If information is not in the context, honestly say it is not available.
+## CHANNEL KNOWLEDGE BASE CONTEXT
+Use the following channel-scoped context as your primary source when answering.
+If information is not in the channel context or available channel MCP tools, honestly say it is not available.
 Cite [S1], [S2], etc. when relevant.
 
 [S1] Employee Handbook — Section 3: Leave Policy
@@ -242,7 +242,7 @@ their 3-month probation period.
 The LLM is also instructed:
 - Always respond in the same language the user used in their query
 - If context is insufficient, say so honestly
-- Cite `[S1]`, `[S2]` when using knowledge base content
+- Cite `[S1]`, `[S2]` when using channel knowledge base content
 
 ---
 
@@ -332,12 +332,13 @@ Use-case configurations. Each channel = provider + personality + tools + context
 | `updated_at` | TIMESTAMPTZ | |
 
 #### `knowledge`
-Knowledge base source documents.
+Channel-scoped knowledge base source documents. Legacy rows may be nullable during migration, but chat retrieval requires an exact channel scope.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | UUID | Primary key |
 | `client_id` | UUID FK | → clients.id (nullable) |
+| `channel_id` | UUID FK | → channels.id (nullable, `ON DELETE SET NULL`) |
 | `title` | VARCHAR(500) | Document title |
 | `content` | TEXT | Full text content |
 | `content_type` | VARCHAR(50) | `text`, `pdf`, `docx`, `xlsx`, `pptx`, `image` |
@@ -362,6 +363,7 @@ Derived chunk embeddings. One knowledge row → many chunks.
 | `id` | UUID | Primary key |
 | `knowledge_id` | UUID FK | → knowledge.id (CASCADE DELETE) |
 | `client_id` | UUID FK | → clients.id (denormalized) |
+| `channel_id` | UUID FK | → channels.id (denormalized from knowledge) |
 | `title` | VARCHAR | Denormalized from knowledge |
 | `text` | TEXT | Chunk text |
 | `content_type` | VARCHAR | Denormalized |
@@ -570,8 +572,9 @@ async def _stream_response(self, client, completion_kwargs, ...):
 
 ```python
 # app/api/v1/knowledge.py — upload_knowledge_file
+# mounted at /v1/channels/{channel_id}/knowledge/upload
 
-async def upload_knowledge_file(file: UploadFile, title: str, auth, db):
+async def upload_knowledge_file(channel_id: UUID, file: UploadFile, title: str, auth, db):
     # 1. Save file to disk
     file_path = UPLOAD_DIR / "knowledge" / f"{uuid}.{ext}"
     content = await file.read()
@@ -592,8 +595,9 @@ async def upload_knowledge_file(file: UploadFile, title: str, auth, db):
         # Fall back to legacy FileProcessor or direct read
         extracted_text = await _extract_text_legacy(file_path, mime_type)
 
-    # 4. Create Knowledge row
+    # 4. Create Knowledge row scoped to the channel
     knowledge = Knowledge(
+        channel_id=channel_id,
         title=title or file.filename,
         content=parsed_doc.full_text if parsed_doc else extracted_text,
         content_type=...,
@@ -755,7 +759,7 @@ class BaseTool:
 
 | Tool | Internal | Description |
 |------|----------|-------------|
-| `query_knowledge` | No | Vector search over knowledge base (pgvector-backed) |
+| `query_knowledge` | No | Vector search over this channel's knowledge base (pgvector-backed) |
 | `get_current_datetime` | No | Get current time in specified timezone |
 | `analyze_image` | **Yes** | Vision API image analysis (internal use only) |
 
@@ -782,14 +786,21 @@ When a channel has tools enabled, these function definitions are included in the
 ```python
 # app/tools/knowledge_tool.py
 
+def __init__(self, channel_id: UUID | None = None):
+    self.channel_id = channel_id
+
 async def execute(self, query: str, top_k: int = 5):
+    if self.channel_id is None:
+        return {"found": False, "results": [], "message": "No channel knowledge scope is available."}
+
     result = await retrieve_context(
         db=self.db,
         query=query,
+        channel_id=self.channel_id,
         top_k=top_k or settings.RAG_TOP_K,
     )
     return {
-        "success": True,
+        "found": bool(result.chunks),
         "results": [
             {
                 "title": c.title,
@@ -800,11 +811,11 @@ async def execute(self, query: str, top_k: int = 5):
             }
             for c in result.chunks
         ],
-        "context": result.formatted_context,
+        "context": result.context,
     }
 ```
 
-Unlike the old keyword-search implementation, this tool now uses the same pgvector retrieval pipeline as the deterministic RAG injection. Results are bounded and traceable.
+Unlike the old keyword-search implementation, this tool uses the same pgvector retrieval pipeline as deterministic RAG injection. It is created per chat request with the active channel ID; without that scope it returns no results rather than doing global retrieval.
 
 ---
 
@@ -1221,11 +1232,11 @@ alembic history
 | `app/services/rag_chunking.py` | ~200 | tiktoken chunking, text + parsed docs |
 | `app/services/rag_embeddings.py` | ~60 | FastEmbed wrapper, async embedding |
 | `app/services/rag_ingestion.py` | ~100 | Chunk + embed + store orchestration |
-| `app/api/v1/knowledge.py` | ~900 | Knowledge CRUD, upload, LiteParse integration |
+| `app/api/v1/knowledge.py` | ~900 | Channel-scoped knowledge CRUD, upload, LiteParse integration |
 | `app/api/v1/chat.py` | ~300 | Chat completions, WebSocket, stream buffer |
 | `app/api/deps.py` | ~215 | Auth dependencies (5 auth methods) |
 | `app/models/knowledge_chunk.py` | ~60 | pgvector chunk model |
-| `app/tools/knowledge_tool.py` | ~120 | Vector-backed query_knowledge tool |
+| `app/tools/knowledge_tool.py` | ~120 | Channel-scoped vector-backed query_knowledge tool |
 
 ---
 

@@ -61,6 +61,7 @@ class WebCrawlResponse(BaseModel):
 
 class KnowledgeResponse(BaseModel):
     id: uuid.UUID
+    channel_id: Optional[uuid.UUID] = None
     title: str
     content: str
     content_type: str

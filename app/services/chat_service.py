@@ -20,6 +20,7 @@ from app.schemas.chat import ChatCompletionRequest, ChatCompletionResponse
 from app.services.mcp_http_client import McpHttpConnection
 from app.services.rag_retrieval import retrieve_context
 from app.tools.base import BaseTool
+from app.tools.knowledge_tool import KnowledgeTool
 from app.tools.mcp_tool_adapter import McpToolAdapter
 from app.tools.registry import tool_registry
 
@@ -82,10 +83,13 @@ class ChatService:
             logger.warning("[MCP SYNC] Failed to load channel MCP tools: %s", e)
             return []
 
-    async def get_knowledge_context(self, query: str = "") -> str:
-        """Get active knowledge as context. Optionally filter by query."""
+    async def get_knowledge_context(self, channel_id: str, query: str = "") -> str:
+        """Get active channel knowledge as context. Optionally filter by query."""
         result = await self.db.execute(
-            select(Knowledge).where(Knowledge.is_active.is_(True))
+            select(Knowledge).where(
+                Knowledge.channel_id == channel_id,
+                Knowledge.is_active.is_(True),
+            )
         )
         items = result.scalars().all()
         if not items:
@@ -153,9 +157,9 @@ class ChatService:
             )
             prompt = guard_prompt + "\n\n" + prompt
         elif channel:
-            # Check if knowledge exists for knowledge-only guard. If the channel has MCP tools,
+            # Check if channel knowledge exists for knowledge-only guard. If the channel has MCP tools,
             # those tools are also valid sources and should not be blocked by the knowledge guard.
-            has_knowledge = await self._check_knowledge_exists()
+            has_knowledge = await self._check_knowledge_exists(channel.id)
             if has_knowledge or has_mcp_tools:
                 guard_prompt = self._build_knowledge_only_guard(allow_channel_tools=has_mcp_tools)
                 prompt = guard_prompt + "\n\n" + prompt
@@ -179,10 +183,15 @@ class ChatService:
 
         return prompt
 
-    async def _check_knowledge_exists(self) -> bool:
-        """Check if any active knowledge exists."""
+    async def _check_knowledge_exists(self, channel_id: str) -> bool:
+        """Check if any active knowledge exists for a channel."""
         result = await self.db.execute(
-            select(Knowledge).where(Knowledge.is_active.is_(True)).limit(1)
+            select(Knowledge)
+            .where(
+                Knowledge.channel_id == channel_id,
+                Knowledge.is_active.is_(True),
+            )
+            .limit(1)
         )
         return result.scalar_one_or_none() is not None
 
@@ -203,7 +212,7 @@ You are an assistant for: {context}"""
         if allow_channel_tools:
             guard += """
 
-Authorized channel MCP tools are part of this channel's approved data sources. Use them when they can answer channel-related questions that are not fully covered by the knowledge base."""
+Authorized channel MCP tools are part of this channel's approved data sources. Use them when they can answer channel-related questions that are not fully covered by this channel's knowledge base."""
 
         guard += f"""
 
@@ -227,9 +236,9 @@ Authorized channel MCP tools are part of this channel's approved data sources. U
    - Offer help that is RELEVANT to {context}
    - NEVER answer the question, even if the user insists
 
-4. If the question IS relevant to {context} but the specific information is NOT in the knowledge base:
+4. If the question IS relevant to {context} but the specific information is NOT in this channel's knowledge base:
    - If channel tools are available and one may answer the question, use the tool first
-   - HONESTLY state that the information is not yet available in the system only after the knowledge base and relevant tools cannot answer it
+   - HONESTLY state that the information is not yet available in the system only after this channel's knowledge base and relevant tools cannot answer it
    - NEVER fabricate information
    - Offer to help with other related questions
 
@@ -253,14 +262,14 @@ Always respond in the same language the user used in their query.
     def _build_knowledge_only_guard(self, allow_channel_tools: bool = False) -> str:
         """Build knowledge/tool guard prompt (when scoped data sources exist)."""
         if allow_channel_tools:
-            sources = "the knowledge base and channel MCP tools"
+            sources = "this channel's knowledge base and channel MCP tools"
             missing_rule = (
-                "If the question is not answerable from the knowledge base, use relevant "
+                "If the question is not answerable from this channel's knowledge base, use relevant "
                 "channel MCP tools before saying the information is unavailable."
             )
         else:
-            sources = "the knowledge base"
-            missing_rule = "If the question is not related to the knowledge base or the information is unavailable:"
+            sources = "this channel's knowledge base"
+            missing_rule = "If the question is not related to this channel's knowledge base or the information is unavailable:"
 
         return f"""## KNOWLEDGE AND TOOL SCOPE
 
@@ -432,6 +441,9 @@ Always respond in the same language the user used in their query.
 
         available_tools: List[BaseTool] = list(builtin_tools)
         seen_tool_names = {tool.name for tool in available_tools}
+        if channel and "query_knowledge" not in seen_tool_names:
+            available_tools.append(KnowledgeTool(channel_id=channel.id))
+            seen_tool_names.add("query_knowledge")
         for tool in mcp_tools:
             if tool.name in seen_tool_names:
                 logger.warning("[MCP SYNC] Skipping duplicate MCP tool name: %s", tool.name)
@@ -464,18 +476,19 @@ Always respond in the same language the user used in their query.
             (msg.content for msg in reversed(request.messages) if msg.role == "user"),
             "",
         )
-        if latest_user_message and settings.RAG_ENABLED:
+        if latest_user_message and settings.RAG_ENABLED and channel:
             try:
                 rag_result = await retrieve_context(
                     self.db,
                     latest_user_message,
-                    channel_context=channel.context if channel else None,
-                    channel_description=channel.context_description if channel else None,
+                    channel_id=channel.id,
+                    channel_context=channel.context,
+                    channel_description=channel.context_description,
                 )
                 if rag_result.context:
                     system_prompt += (
-                        "\n\n## KNOWLEDGE BASE CONTEXT\n"
-                        "Use the following context as your primary source when answering. "
+                        "\n\n## CHANNEL KNOWLEDGE BASE CONTEXT\n"
+                        "Use the following channel-scoped context as your primary source when answering. "
                         "If information is not in the context but a relevant channel MCP tool is available, use the tool before saying it is unavailable. "
                         "Cite [S1], [S2], etc. when relevant.\n\n"
                         f"{rag_result.context}"

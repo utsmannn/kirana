@@ -51,6 +51,7 @@ async def index_knowledge(
                 KnowledgeChunk(
                     knowledge_id=knowledge.id,
                     client_id=knowledge.client_id,
+                    channel_id=knowledge.channel_id,
                     title=knowledge.title,
                     text=chunk.text,
                     content_type=knowledge.content_type,
@@ -72,6 +73,7 @@ def _base_metadata(knowledge: Knowledge) -> dict[str, Any]:
     metadata = dict(knowledge.extra_metadata or {})
     metadata.update({
         "knowledge_id": str(knowledge.id),
+        "channel_id": str(knowledge.channel_id) if knowledge.channel_id else None,
         "title": knowledge.title,
         "content_type": knowledge.content_type,
         "source_type": knowledge.source_type,

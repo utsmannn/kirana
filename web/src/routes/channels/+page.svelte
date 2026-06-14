@@ -34,6 +34,7 @@
 	import { adminToken } from '$lib/stores.svelte';
 	import { showToast } from '$lib/toast.svelte';
 	import Button from '$lib/components/Button.svelte';
+	import ChannelKnowledgeManager from '$lib/components/ChannelKnowledgeManager.svelte';
 	import Modal from '$lib/components/Modal.svelte';
 
 	// Data
@@ -91,6 +92,9 @@
 	let fontSearchLoading = $state(false);
 	let showFontDropdown = $state(false);
 	let fontDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+	// Channel knowledge
+	let expandedKnowledgeChannelId = $state<string | null>(null);
 
 	// MCP servers
 	let expandedMcpChannelId = $state<string | null>(null);
@@ -407,6 +411,10 @@
 		}
 	}
 
+	function toggleKnowledgeSection(channelId: string) {
+		expandedKnowledgeChannelId = expandedKnowledgeChannelId === channelId ? null : channelId;
+	}
+
 	async function toggleMcpSection(channelId: string) {
 		if (expandedMcpChannelId === channelId) {
 			expandedMcpChannelId = null;
@@ -716,6 +724,12 @@
 												Edit
 											</button>
 												<button
+													onclick={() => toggleKnowledgeSection(channel.id)}
+													class="rounded-lg bg-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-600"
+												>
+													Knowledge
+												</button>
+												<button
 													onclick={() => toggleMcpSection(channel.id)}
 													class="rounded-lg bg-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-600"
 												>
@@ -738,6 +752,12 @@
 										</div>
 									</div>
 								</div>
+
+									{#if expandedKnowledgeChannelId === channel.id}
+										<div class="mt-4 border-t border-zinc-700 pt-4">
+											<ChannelKnowledgeManager channelId={channel.id} />
+										</div>
+									{/if}
 
 									{#if expandedMcpChannelId === channel.id}
 										<div class="mt-4 border-t border-zinc-700 pt-4">

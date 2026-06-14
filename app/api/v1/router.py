@@ -28,7 +28,11 @@ api_router.include_router(
 api_router.include_router(clients.router, prefix="/clients", tags=["clients"])
 api_router.include_router(config.router, prefix="/config", tags=["config"])
 api_router.include_router(sessions.router, prefix="/sessions", tags=["sessions"])
-api_router.include_router(knowledge.router, prefix="/knowledge", tags=["knowledge"])
+api_router.include_router(
+    knowledge.router,
+    prefix="/channels/{channel_id}/knowledge",
+    tags=["channel-knowledge"],
+)
 api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
 api_router.include_router(personalities.router, prefix="/personalities", tags=["personalities"])
 api_router.include_router(tools.router, prefix="/tools", tags=["tools"])

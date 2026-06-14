@@ -43,13 +43,14 @@ async def retrieve_context(
     db: AsyncSession,
     query: str,
     *,
+    channel_id: uuid.UUID | None = None,
     channel_context: str | None = None,
     channel_description: str | None = None,
     client_id: uuid.UUID | None = None,
     top_k: int | None = None,
     max_chars: int | None = None,
 ) -> RetrievalResult:
-    if not settings.RAG_ENABLED or not query.strip():
+    if not settings.RAG_ENABLED or not query.strip() or channel_id is None:
         return RetrievalResult(chunks=[], context="", citations=[])
 
     top_k = top_k or settings.RAG_TOP_K
@@ -61,7 +62,11 @@ async def retrieve_context(
     stmt = (
         select(KnowledgeChunk, Knowledge, distance.label("distance"))
         .join(Knowledge, Knowledge.id == KnowledgeChunk.knowledge_id)
-        .where(Knowledge.is_active.is_(True))
+        .where(
+            Knowledge.is_active.is_(True),
+            Knowledge.channel_id == channel_id,
+            KnowledgeChunk.channel_id == channel_id,
+        )
         .order_by(distance)
         .limit(max(top_k * 3, top_k))
     )
