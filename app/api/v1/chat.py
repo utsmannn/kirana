@@ -419,6 +419,14 @@ async def chat_websocket(
                                         session_id = payload["session_id"]
                                         continue
 
+                                    # Forward tool lifecycle events so websocket clients can inspect tool usage.
+                                    if payload.get("type", "").startswith("tool_call_"):
+                                        try:
+                                            await websocket.send_json(payload)
+                                        except (WebSocketDisconnect, RuntimeError):
+                                            logger.info("[WS] Client disconnected mid-tool-event, buffering %s", stream_id)
+                                        continue
+
                                     # Regular content chunk
                                     content = payload.get("choices", [{}])[0].get("delta", {}).get("content", "")
                                     if content:

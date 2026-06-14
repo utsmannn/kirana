@@ -44,5 +44,4 @@ class ToolRegistry:
             and (include_internal or not tool.internal)
         ]
 
-
 tool_registry = ToolRegistry()

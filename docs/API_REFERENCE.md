@@ -426,6 +426,127 @@ Partial update. All fields optional.
 #### `POST /v1/channels/{channel_id}/set-default`
 Make this channel the default (unsets all others).
 
+#### MCP Server Configuration
+
+MCP servers are configured per channel. A channel can have multiple active MCP servers; Kirana discovers tools from all active servers for that channel at chat-request time.
+
+Supported transports:
+- `sse` — legacy MCP SSE endpoint
+- `http` — MCP Streamable HTTP endpoint
+- `stdio` — local MCP child process launched by the backend
+
+Supported auth types:
+- `none` — no extra auth headers
+- `bearer` — pass `Authorization: Bearer <token>` from `auth_config.token` for remote transports
+- `custom_header` — pass headers from `auth_config.headers` for remote transports
+
+`server_url` is required for `sse`/`http` and must use `http://` or `https://`. For `stdio`, use `server_config` instead:
+
+```json
+{
+  "command": "npx",
+  "args": ["-y", "@modelcontextprotocol/server-everything"],
+  "env": {},
+  "cwd": null
+}
+```
+
+`auth_config` and `server_config` are write-only. Responses expose `auth_configured: boolean` and `server_configured: boolean`, and never return raw credentials, command env, or server config.
+
+##### `GET /v1/channels/{channel_id}/mcp-servers/`
+List MCP servers configured for a channel.
+
+**Response `200`:**
+```json
+[
+  {
+    "id": "770e8400-...",
+    "channel_id": "550e8400-...",
+    "name": "Database MCP",
+    "server_url": "https://db.example.com/mcp",
+    "transport": "http",
+    "auth_type": "bearer",
+    "auth_configured": true,
+    "server_configured": false,
+    "is_active": true,
+    "created_at": "2026-06-15T00:00:00",
+    "updated_at": "2026-06-15T00:00:00"
+  }
+]
+```
+
+##### `POST /v1/channels/{channel_id}/mcp-servers/`
+Add an MCP server to a channel.
+
+**Request:**
+```json
+{
+  "name": "Database MCP",
+  "server_url": "https://db.example.com/mcp",
+  "transport": "http",
+  "auth_type": "bearer",
+  "auth_config": {
+    "token": "secret-token"
+  }
+}
+```
+
+**Stdio request:**
+```json
+{
+  "name": "Local Filesystem MCP",
+  "transport": "stdio",
+  "auth_type": "none",
+  "server_config": {
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/data"],
+    "env": {}
+  }
+}
+```
+
+**Response `201`:** MCP server object with `auth_configured` and `server_configured`, without raw `auth_config` or `server_config`.
+
+**Errors:** `404` — Channel not found. `422` — Invalid URL, transport, auth type, stdio config, or payload.
+
+##### `GET /v1/channels/{channel_id}/mcp-servers/{server_id}`
+Get a single MCP server configuration.
+
+##### `PATCH /v1/channels/{channel_id}/mcp-servers/{server_id}`
+Partial update. All fields are optional: `name`, `server_url`, `transport`, `auth_type`, `auth_config`, `server_config`, `is_active`. Omit `auth_config` or `server_config` to preserve the existing stored value.
+
+##### `DELETE /v1/channels/{channel_id}/mcp-servers/{server_id}`
+Delete an MCP server configuration. Returns `204`.
+
+##### `POST /v1/channels/{channel_id}/mcp-servers/{server_id}/activate`
+Activate an MCP server. Active servers are included in channel tool discovery.
+
+##### `POST /v1/channels/{channel_id}/mcp-servers/{server_id}/deactivate`
+Deactivate an MCP server. Inactive servers remain configured but are skipped during chat tool discovery.
+
+##### `POST /v1/channels/{channel_id}/mcp-servers/{server_id}/test`
+Connect to the MCP server and list discovered tools without changing channel state.
+
+**Response `200`:**
+```json
+{
+  "success": true,
+  "message": "Connected successfully",
+  "tools": [
+    {
+      "name": "query_database",
+      "description": "Run a read-only database query",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string" }
+        }
+      }
+    }
+  ]
+}
+```
+
 #### Embed Configuration
 
 ##### `POST /v1/channels/{channel_id}/embed`

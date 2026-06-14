@@ -1,5 +1,6 @@
 from app.models.base import Base
 from app.models.channel import Channel
+from app.models.channel_mcp_server import ChannelMcpServer
 from app.models.client import Client
 from app.models.client_config import ClientConfig
 from app.models.conversation import ConversationLog
@@ -13,6 +14,7 @@ from app.models.usage import UsageLog
 __all__ = [
     "Base",
     "Channel",
+    "ChannelMcpServer",
     "Client",
     "ClientConfig",
     "Personality",

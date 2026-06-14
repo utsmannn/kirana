@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api.v1 import (
     admin,
+    channel_mcp_servers,
     channels,
     chat,
     clients,
@@ -19,6 +20,11 @@ api_router = APIRouter()
 api_router.include_router(admin.router, prefix="/admin", tags=["admin"])
 api_router.include_router(providers.router, prefix="/providers", tags=["providers"])
 api_router.include_router(channels.router, prefix="/channels", tags=["channels"])
+api_router.include_router(
+    channel_mcp_servers.router,
+    prefix="/channels/{channel_id}/mcp-servers",
+    tags=["channel-mcp-servers"],
+)
 api_router.include_router(clients.router, prefix="/clients", tags=["clients"])
 api_router.include_router(config.router, prefix="/config", tags=["config"])
 api_router.include_router(sessions.router, prefix="/sessions", tags=["sessions"])
