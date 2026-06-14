@@ -149,6 +149,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Failed to seed default data: %s", e)
 
+    # Preload embedding model at startup so first request doesn't wait for download
+    if settings.RAG_ENABLED:
+        try:
+            from app.services.rag_embeddings import embed_text
+            await embed_text("warmup")
+            logger.info("[STARTUP] Embedding model loaded")
+        except Exception as e:
+            logger.warning("[STARTUP] Failed to preload embedding model: %s", e)
+
     scheduler = setup_scheduler()
     scheduler.start()
     yield

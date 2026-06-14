@@ -194,7 +194,7 @@ flowchart TD
 - **Performance:** ~200 texts/sec on CPU (batch inference)
 - **Memory:** ~470MB loaded
 
-**Singleton pattern:** The model is loaded once at startup via `_get_model()` and reused for all embeddings. Embedding calls are wrapped in `asyncio.to_thread()` to avoid blocking the event loop.
+**Startup preload:** The model is downloaded (if not cached) and loaded during app startup via a warmup call in `lifespan()`. This ensures the first user request doesn't block on a ~118MB download. The singleton `_get_model()` with `@lru_cache` ensures the model is reused for all subsequent embeddings. Embedding calls are wrapped in `asyncio.to_thread()` to avoid blocking the event loop.
 
 ### 2.4 Vector Search
 
