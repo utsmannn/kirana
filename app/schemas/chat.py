@@ -4,9 +4,27 @@ from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field
 
 
+class ChatTextContentPart(BaseModel):
+    type: Literal["text"]
+    text: str
+
+
+class ChatImageUrl(BaseModel):
+    url: str
+
+
+class ChatImageContentPart(BaseModel):
+    type: Literal["image_url"]
+    image_url: ChatImageUrl
+
+
+ChatContentPart = Union[ChatTextContentPart, ChatImageContentPart]
+ChatContent = Union[str, List[ChatContentPart]]
+
+
 class ChatMessage(BaseModel):
     role: Literal["system", "user", "assistant", "tool"]
-    content: str
+    content: ChatContent
     name: Optional[str] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
     tool_call_id: Optional[str] = None

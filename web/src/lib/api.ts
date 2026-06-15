@@ -193,9 +193,23 @@ export function getPersonality(slug: string, token?: string): Promise<Personalit
 
 // ---------- Chat ----------
 
+export type ChatTextPart = {
+	type: 'text';
+	text: string;
+};
+
+export type ChatImagePart = {
+	type: 'image_url';
+	image_url: {
+		url: string;
+	};
+};
+
+export type ChatContent = string | Array<ChatTextPart | ChatImagePart>;
+
 export interface ChatMessage {
 	role: 'system' | 'user' | 'assistant';
-	content: string;
+	content: ChatContent;
 }
 
 export interface ChatRequest {
@@ -210,7 +224,8 @@ export interface ChatRequest {
 export async function* streamChat(
 	data: ChatRequest,
 	token?: string,
-	onStreamId?: (streamId: string) => void
+	onStreamId?: (streamId: string) => void,
+	onSessionId?: (sessionId: string) => void
 ): AsyncGenerator<string, void, unknown> {
 	// Use provided token, or fall back to getAuthToken()
 	const authToken = token || getAuthToken();
@@ -286,6 +301,12 @@ export async function* streamChat(
 					continue;
 				}
 
+				// Handle session_id event
+				if ('session_id' in parsed) {
+					if (onSessionId) onSessionId(String((parsed as { session_id: unknown }).session_id));
+					continue;
+				}
+
 				const content = (parsed as { choices?: { delta?: { content?: string } }[] }).choices?.[0]?.delta?.content;
 				if (content) {
 					yield content;
@@ -297,7 +318,7 @@ export async function* streamChat(
 export function sendChat(
 	data: ChatRequest,
 	token?: string
-): Promise<{ choices: { message: ChatMessage }[] }> {
+): Promise<{ choices: { message: ChatMessage }[]; session?: { id: string } }> {
 	return request('/chat/send', {
 		method: 'POST',
 		token,

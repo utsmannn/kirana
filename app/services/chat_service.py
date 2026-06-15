@@ -1,5 +1,8 @@
+import base64
+import binascii
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
@@ -25,6 +28,16 @@ from app.tools.mcp_tool_adapter import McpToolAdapter
 from app.tools.registry import tool_registry
 
 logger = logging.getLogger(__name__)
+
+CHAT_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+CHAT_IMAGE_MIME_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "image/bmp",
+}
+DATA_IMAGE_RE = re.compile(r"^data:(image/[a-zA-Z0-9.+-]+);base64,(.+)$", re.DOTALL)
 
 
 class ChatService:
@@ -363,6 +376,135 @@ Always respond in the same language the user used in their query.
             kwargs["base_url"] = api_base
         return AsyncOpenAI(**kwargs)
 
+    def _part_to_dict(self, part: Any) -> Dict[str, Any]:
+        if isinstance(part, dict):
+            return part
+        if hasattr(part, "model_dump"):
+            return part.model_dump(mode="json")
+        return {}
+
+    def _content_text(self, content: Any) -> str:
+        if isinstance(content, str):
+            return content.strip()
+        if not isinstance(content, list):
+            return ""
+
+        texts: List[str] = []
+        for part in content:
+            part_data = self._part_to_dict(part)
+            if part_data.get("type") == "text":
+                text = part_data.get("text")
+                if isinstance(text, str) and text.strip():
+                    texts.append(text.strip())
+        return "\n".join(texts).strip()
+
+    def _parse_data_image_url(self, url: str) -> Tuple[str, str, int]:
+        match = DATA_IMAGE_RE.match(url)
+        if not match:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "invalid_chat_image", "message": "Chat images must use a data:image/*;base64 URL."},
+            )
+
+        mime_type = match.group(1).lower()
+        base64_data = re.sub(r"\s+", "", match.group(2))
+        if mime_type not in CHAT_IMAGE_MIME_TYPES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "unsupported_chat_image", "message": f"Unsupported chat image type: {mime_type}"},
+            )
+
+        try:
+            decoded_size = len(base64.b64decode(base64_data, validate=True))
+        except (binascii.Error, ValueError) as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "invalid_chat_image", "message": "Chat image data is not valid base64."},
+            ) from e
+
+        if decoded_size > CHAT_IMAGE_MAX_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail={
+                    "code": "chat_image_too_large",
+                    "message": f"Chat images must be {CHAT_IMAGE_MAX_BYTES // (1024 * 1024)} MB or smaller.",
+                },
+            )
+
+        return mime_type, base64_data, decoded_size
+
+    def _validate_chat_content(self, content: Any) -> None:
+        if isinstance(content, str):
+            return
+        if not isinstance(content, list):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "invalid_chat_content", "message": "Chat message content must be text or supported content parts."},
+            )
+
+        for part in content:
+            part_data = self._part_to_dict(part)
+            part_type = part_data.get("type")
+            if part_type == "text":
+                if not isinstance(part_data.get("text"), str):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={"code": "invalid_chat_content", "message": "Text content parts require a text string."},
+                    )
+            elif part_type == "image_url":
+                image_url = part_data.get("image_url")
+                if not isinstance(image_url, dict) or not isinstance(image_url.get("url"), str):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={"code": "invalid_chat_image", "message": "Image content parts require an image_url.url string."},
+                    )
+                self._parse_data_image_url(image_url["url"])
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"code": "invalid_chat_content", "message": f"Unsupported chat content part type: {part_type}"},
+                )
+
+    def _serialize_content_for_storage(self, content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return str(content)
+
+        images: List[Dict[str, Any]] = []
+        text = self._content_text(content)
+        for part in content:
+            part_data = self._part_to_dict(part)
+            if part_data.get("type") != "image_url":
+                continue
+            url = part_data.get("image_url", {}).get("url", "")
+            mime_type, _, decoded_size = self._parse_data_image_url(url)
+            images.append({
+                "mime_type": mime_type,
+                "size": decoded_size,
+                "redacted": True,
+            })
+
+        return json.dumps({
+            "type": "multimodal",
+            "text": text,
+            "images": images,
+        })
+
+    def _storage_content_to_prompt_text(self, content: str) -> str:
+        try:
+            parsed = json.loads(content)
+        except (TypeError, json.JSONDecodeError):
+            return content
+
+        if not isinstance(parsed, dict) or parsed.get("type") != "multimodal":
+            return content
+
+        text = parsed.get("text") if isinstance(parsed.get("text"), str) else ""
+        images = parsed.get("images") if isinstance(parsed.get("images"), list) else []
+        note = f"[User attached {len(images)} image(s) in this previous message]" if images else ""
+        return "\n".join(part for part in [note, text] if part).strip()
+
     def _raise_provider_error(self, error: Exception, model: str) -> None:
         """Map OpenAI-compatible provider errors to clear HTTP errors."""
         provider_message = str(error)
@@ -472,8 +614,11 @@ Always respond in the same language the user used in their query.
         # Build system prompt with channel config
         system_prompt = await self.build_system_prompt(channel, available_tools=available_tools)
 
+        for msg in request.messages:
+            self._validate_chat_content(msg.content)
+
         latest_user_message = next(
-            (msg.content for msg in reversed(request.messages) if msg.role == "user"),
+            (self._content_text(msg.content) for msg in reversed(request.messages) if msg.role == "user"),
             "",
         )
         if latest_user_message and settings.RAG_ENABLED and channel:
@@ -509,11 +654,11 @@ Always respond in the same language the user used in their query.
             )
             history = h_result.scalars().all()
             for msg in reversed(history):
-                messages.append({"role": msg.role, "content": msg.content})
+                messages.append({"role": msg.role, "content": self._storage_content_to_prompt_text(msg.content)})
 
         # Add user messages
         for msg in request.messages:
-            messages.append(msg.model_dump(exclude_unset=True))
+            messages.append(msg.model_dump(exclude_unset=True, mode="json"))
 
         model = request.model if request.model != "default" else settings.DEFAULT_MODEL
 
@@ -599,7 +744,7 @@ Always respond in the same language the user used in their query.
             db_user_msg = ConversationLog(
                 session_id=session.id,
                 role=user_msg.role,
-                content=user_msg.content,
+                content=self._serialize_content_for_storage(user_msg.content),
                 model=model,
                 tokens_used=0,
             )
@@ -829,11 +974,11 @@ Always respond in the same language the user used in their query.
                     full_content += chunk_content
                     yield f"data: {json.dumps(chunk.model_dump(exclude_none=True))}\n\n"
 
-        yield "data: [DONE]\n\n"
-
-        # Send session_id if available (for embed chat to continue conversation)
+        # Send session_id before [DONE] so clients that stop on [DONE] can still receive it.
         if session:
             yield f"data: {json.dumps({'session_id': str(session.id)})}\n\n"
+
+        yield "data: [DONE]\n\n"
 
         latency_ms = int((time.monotonic() - start_time) * 1000)
 

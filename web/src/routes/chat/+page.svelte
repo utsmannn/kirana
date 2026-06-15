@@ -10,6 +10,7 @@
 		getChannels,
 		getStreamChunks,
 		ApiError,
+		type ChatContent,
 		type ChatMessage,
 		type Session,
 		type SessionMessage,
@@ -19,9 +20,16 @@
 	import { showToast } from '$lib/toast.svelte';
 	import Button from '$lib/components/Button.svelte';
 
+	interface DisplayImage {
+		dataUrl?: string;
+		mimeType?: string;
+		redacted?: boolean;
+	}
+
 	interface DisplayMessage {
 		role: 'user' | 'assistant';
 		content: string;
+		images?: DisplayImage[];
 		isError?: boolean;
 	}
 
@@ -36,6 +44,8 @@
 
 	let messages = $state<DisplayMessage[]>([]);
 	let input = $state('');
+	let imageInput: HTMLInputElement | undefined = $state();
+	let selectedImage = $state<{ file: File; dataUrl: string; mimeType: string } | null>(null);
 	let streaming = $state(false);
 	let model = $state('');
 
@@ -71,6 +81,8 @@
 	let chatContainer: HTMLDivElement | undefined = $state();
 
 	const SESSION_STORAGE_KEY = 'kirana_current_session_id';
+	const CHAT_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+	const CHAT_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp'];
 
 	const currentSessionName = $derived(
 		sessions.find((s) => s.id === currentSessionId)?.name ?? 'New Chat'
@@ -183,16 +195,88 @@
 		}
 	}
 
+	function parseStoredMessageContent(content: string): { text: string; images: DisplayImage[] } {
+		try {
+			const parsed = JSON.parse(content) as {
+				type?: string;
+				text?: string;
+				images?: Array<{ mime_type?: string; redacted?: boolean }>;
+			};
+			if (parsed?.type === 'multimodal') {
+				return {
+					text: parsed.text || '',
+					images: (parsed.images || []).map((image) => ({
+						mimeType: image.mime_type,
+						redacted: image.redacted ?? true
+					}))
+				};
+			}
+		} catch {
+			// plain text
+		}
+		return { text: content, images: [] };
+	}
+
+	function displayMessageFromSession(m: SessionMessage): DisplayMessage {
+		const parsed = parseStoredMessageContent(m.content);
+		return {
+			role: m.role as 'user' | 'assistant',
+			content: parsed.text,
+			images: parsed.images
+		};
+	}
+
+	function chatContentToText(content: ChatContent): string {
+		if (typeof content === 'string') return content;
+		return content
+			.filter((part) => part.type === 'text')
+			.map((part) => part.text)
+			.join('\n')
+			.trim();
+	}
+
+	function fileToDataUrl(file: File): Promise<string> {
+		return new Promise((resolve, reject) => {
+			const reader = new FileReader();
+			reader.onload = () => resolve(String(reader.result || ''));
+			reader.onerror = () => reject(new Error('Failed to read image'));
+			reader.readAsDataURL(file);
+		});
+	}
+
+	async function handleImageSelected(event: Event) {
+		const inputEl = event.currentTarget as HTMLInputElement;
+		const file = inputEl.files?.[0];
+		inputEl.value = '';
+		if (!file) return;
+
+		if (!CHAT_IMAGE_TYPES.includes(file.type)) {
+			showToast('Unsupported image type. Use JPG, PNG, GIF, WebP, or BMP.', 'error');
+			return;
+		}
+		if (file.size > CHAT_IMAGE_MAX_BYTES) {
+			showToast('Image must be 5 MB or smaller.', 'error');
+			return;
+		}
+
+		try {
+			selectedImage = { file, dataUrl: await fileToDataUrl(file), mimeType: file.type };
+		} catch {
+			showToast('Failed to read image', 'error');
+		}
+	}
+
+	function removeSelectedImage() {
+		selectedImage = null;
+	}
+
 	async function selectSession(session: Session) {
 		currentSessionId = session.id;
 		showSessions = false;
 
 		try {
 			const resp = await getSessionMessages(session.id);
-			messages = (resp.messages || []).map((m: SessionMessage) => ({
-				role: m.role as 'user' | 'assistant',
-				content: m.content
-			}));
+			messages = (resp.messages || []).map(displayMessageFromSession);
 		} catch (err) {
 			if (err instanceof ApiError) {
 				showToast(err.message, 'error');
@@ -247,10 +331,7 @@
 				currentSessionId = resume.session_id;
 				try {
 					const resp = await getSessionMessages(resume.session_id);
-					const loaded = (resp.messages || []).map((m: SessionMessage) => ({
-						role: m.role as 'user' | 'assistant',
-						content: m.content
-					}));
+					const loaded = (resp.messages || []).map(displayMessageFromSession);
 					// If last message is assistant with content, stream already saved
 					if (loaded.length > 0 && loaded[loaded.length - 1].role === 'assistant' && loaded[loaded.length - 1].content) {
 						messages = loaded;
@@ -315,20 +396,33 @@
 	}
 
 	async function doSendMessage() {
-		if (!input.trim() || streaming) return;
+		if ((!input.trim() && !selectedImage) || streaming) return;
 
 		const activeSessionId = currentSessionId;
 		const userMessage = input.trim();
+		const attachedImage = selectedImage;
 		input = '';
+		selectedImage = null;
 
-		messages = [...messages, { role: 'user', content: userMessage }];
+		const outgoingContent: ChatContent = attachedImage
+			? [
+					...(userMessage ? [{ type: 'text' as const, text: userMessage }] : []),
+					{ type: 'image_url' as const, image_url: { url: attachedImage.dataUrl } }
+				]
+			: userMessage;
 
-		const apiMessages: ChatMessage[] = messages.map((m) => ({
-			role: m.role,
-			content: m.content
-		}));
+		const userDisplay: DisplayMessage = {
+			role: 'user',
+			content: userMessage,
+			images: attachedImage ? [{ dataUrl: attachedImage.dataUrl, mimeType: attachedImage.mimeType }] : []
+		};
 
-		messages = [...messages, { role: 'assistant', content: '' }];
+		const apiMessages: ChatMessage[] = [
+			...messages.map((m) => ({ role: m.role, content: m.content })),
+			{ role: 'user', content: outgoingContent }
+		];
+
+		messages = [...messages, userDisplay, { role: 'assistant', content: '' }];
 		const assistantIdx = messages.length - 1;
 
 		streaming = true;
@@ -341,7 +435,7 @@
 			pendingResume = {
 				stream_id: streamId,
 				session_id: activeSessionId,
-				user_message: userMessage
+				user_message: userMessage || '[Image]'
 			};
 			localStorage.setItem(RESUME_STORAGE_KEY, JSON.stringify(pendingResume));
 		}
@@ -359,10 +453,16 @@
 					// Update resume state with stream_id
 					pendingResume = {
 						stream_id: sid,
-						session_id: activeSessionId,
-						user_message: userMessage
+						session_id: currentSessionId,
+						user_message: userMessage || '[Image]'
 					};
 					localStorage.setItem(RESUME_STORAGE_KEY, JSON.stringify(pendingResume));
+				}, (sessionId: string) => {
+					currentSessionId = sessionId;
+					if (pendingResume) {
+						pendingResume = { ...pendingResume, session_id: sessionId };
+						localStorage.setItem(RESUME_STORAGE_KEY, JSON.stringify(pendingResume));
+					}
 				});
 
 				for await (const chunk of gen) {
@@ -380,15 +480,17 @@
 					channel_id: selectedChannelId || undefined
 				}, undefined);
 
-				const content = response.choices?.[0]?.message?.content || '';
+				const content = chatContentToText(response.choices?.[0]?.message?.content || '');
 				messages[assistantIdx] = { role: 'assistant', content };
+				const responseSession = (response as { session?: { id?: string } }).session;
+				if (responseSession?.id) currentSessionId = responseSession.id;
 			}
-			} catch (err) {
-				if (err instanceof ApiError) {
-					messages[assistantIdx] = { role: 'assistant', content: err.message, isError: true };
-				} else {
-					messages[assistantIdx] = { role: 'assistant', content: 'Failed to get response', isError: true };
-				}
+		} catch (err) {
+			if (err instanceof ApiError) {
+				messages[assistantIdx] = { role: 'assistant', content: err.message, isError: true };
+			} else {
+				messages[assistantIdx] = { role: 'assistant', content: 'Failed to get response', isError: true };
+			}
 		} finally {
 			streaming = false;
 			pendingResume = null;
@@ -662,7 +764,22 @@
 												{@html (window as any).marked ? (window as any).marked.parse(message.content) : message.content}
 											</div>
 										{:else}
-											<p class="whitespace-pre-wrap">{message.content}</p>
+											{#if message.images?.length}
+												<div class="mb-2 flex flex-wrap gap-2">
+													{#each message.images as image}
+														{#if image.dataUrl}
+															<img src={image.dataUrl} alt="Attached" class="max-h-48 max-w-full rounded-lg border border-white/20 object-contain" />
+														{:else}
+															<div class="rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-xs">
+																Attached image{image.mimeType ? ` (${image.mimeType})` : ''}
+															</div>
+														{/if}
+													{/each}
+												</div>
+											{/if}
+											{#if message.content}
+												<p class="whitespace-pre-wrap">{message.content}</p>
+											{/if}
 										{/if}
 									{/if}
 								</div>
@@ -681,24 +798,48 @@
 
 			<!-- Input -->
 			<div class="border-t border-zinc-800 p-4">
-				<div class="mx-auto flex max-w-3xl gap-3">
-					<input
-						type="text"
-						bind:value={input}
-						placeholder={adminToken.value
-							? 'Type your message...'
-							: 'Please log in'}
-						disabled={streaming || !adminToken.value}
-						onkeydown={handleKeydown}
-						class="flex-1 rounded-xl border border-zinc-700 bg-zinc-800 px-4 py-3 text-sm text-zinc-100 placeholder-zinc-500 transition-colors focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-none disabled:opacity-50"
-					/>
-					<Button
-						onclick={() => doSendMessage()}
-						disabled={!input.trim() || streaming || !adminToken.value}
-						loading={streaming}
-					>
-						Send
-					</Button>
+				<div class="mx-auto max-w-3xl">
+					{#if selectedImage}
+						<div class="mb-3 flex items-center gap-3 rounded-xl border border-zinc-700 bg-zinc-900 p-2">
+							<img src={selectedImage.dataUrl} alt="Selected" class="h-16 w-16 rounded-lg object-cover" />
+							<div class="min-w-0 flex-1">
+								<p class="truncate text-sm font-medium text-zinc-200">{selectedImage.file.name}</p>
+								<p class="text-xs text-zinc-500">{selectedImage.mimeType}</p>
+							</div>
+							<button type="button" onclick={removeSelectedImage} class="rounded-lg px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+								Remove
+							</button>
+						</div>
+					{/if}
+					<div class="flex gap-3">
+						<input
+							bind:this={imageInput}
+							type="file"
+							accept="image/jpeg,image/png,image/gif,image/webp,image/bmp"
+							class="hidden"
+							onchange={handleImageSelected}
+						/>
+						<Button type="button" variant="secondary" onclick={() => imageInput?.click()} disabled={streaming || !adminToken.value}>
+							Image
+						</Button>
+						<input
+							type="text"
+							bind:value={input}
+							placeholder={adminToken.value
+								? 'Type your message...'
+								: 'Please log in'}
+							disabled={streaming || !adminToken.value}
+							onkeydown={handleKeydown}
+							class="flex-1 rounded-xl border border-zinc-700 bg-zinc-800 px-4 py-3 text-sm text-zinc-100 placeholder-zinc-500 transition-colors focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-none disabled:opacity-50"
+						/>
+						<Button
+							onclick={() => doSendMessage()}
+							disabled={(!input.trim() && !selectedImage) || streaming || !adminToken.value}
+							loading={streaming}
+						>
+							Send
+						</Button>
+					</div>
 				</div>
 			</div>
 		</div>

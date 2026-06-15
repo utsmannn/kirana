@@ -23,6 +23,33 @@
 	let showDeleteModal = $state(false);
 	let deleting = $state(false);
 
+	interface DisplayImage {
+		mimeType?: string;
+		redacted?: boolean;
+	}
+
+	function parseStoredMessageContent(content: string): { text: string; images: DisplayImage[] } {
+		try {
+			const parsed = JSON.parse(content) as {
+				type?: string;
+				text?: string;
+				images?: Array<{ mime_type?: string; redacted?: boolean }>;
+			};
+			if (parsed?.type === 'multimodal') {
+				return {
+					text: parsed.text || '',
+					images: (parsed.images || []).map((image) => ({
+						mimeType: image.mime_type,
+						redacted: image.redacted ?? true
+					}))
+				};
+			}
+		} catch {
+			// plain text
+		}
+		return { text: content, images: [] };
+	}
+
 	const sessionId = $derived(page.params.id);
 
 	onMount(async () => {
@@ -180,6 +207,7 @@
 		{:else}
 			<div class="space-y-4">
 				{#each messages as message}
+						{@const parsedContent = parseStoredMessageContent(message.content)}
 					<div class="flex gap-3 {message.role === 'user' ? 'justify-end' : ''}">
 						{#if message.role !== 'user'}
 							<div
@@ -206,7 +234,18 @@
 									{@html (window as any).marked ? (window as any).marked.parse(message.content) : message.content}
 								</div>
 							{:else}
-								<p class="whitespace-pre-wrap text-sm leading-relaxed">{message.content}</p>
+								{#if parsedContent.images.length}
+									<div class="mb-2 flex flex-wrap gap-2">
+										{#each parsedContent.images as image}
+											<div class="rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-xs">
+												Attached image{image.mimeType ? ` (${image.mimeType})` : ''}
+											</div>
+										{/each}
+									</div>
+								{/if}
+								{#if parsedContent.text}
+									<p class="whitespace-pre-wrap text-sm leading-relaxed">{parsedContent.text}</p>
+								{/if}
 							{/if}
 							<p class="mt-1 text-[10px] opacity-50">
 								{formatTime(message.created_at)}
