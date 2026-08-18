@@ -160,7 +160,14 @@ async def lifespan(app: FastAPI):
 
     scheduler = setup_scheduler()
     scheduler.start()
+
+    # Telegram human-agent bridge (no-op when not configured)
+    from app.services.telegram_bridge import telegram_bridge
+    telegram_bridge.start()
+
     yield
+
+    await telegram_bridge.stop()
     scheduler.shutdown()
     logger.info("Shutdown complete")
 

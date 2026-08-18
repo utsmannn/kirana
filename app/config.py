@@ -83,6 +83,14 @@ class Settings(BaseSettings):
     # API Authentication (single-tenant mode)
     KIRANA_API_KEY: str = "kirana-default-api-key-change-me"
 
+    # Session event webhook (server-to-server, e.g. Telegram bridge)
+    WEBHOOK_URL: Optional[str] = None
+    WEBHOOK_SECRET: Optional[str] = None
+
+    # Telegram human-agent bridge (optional — tools activate when both are set)
+    TELEGRAM_BOT_TOKEN: Optional[str] = None
+    TELEGRAM_CHAT_ID: Optional[str] = None
+
     # Upload directory for knowledge files
     UPLOAD_DIR: str = "/app/uploads"
 

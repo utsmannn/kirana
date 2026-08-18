@@ -10,6 +10,7 @@ from app.api.v1 import (
     knowledge,
     personalities,
     providers,
+    session_events,
     sessions,
     tools,
     usage,
@@ -28,6 +29,7 @@ api_router.include_router(
 api_router.include_router(clients.router, prefix="/clients", tags=["clients"])
 api_router.include_router(config.router, prefix="/config", tags=["config"])
 api_router.include_router(sessions.router, prefix="/sessions", tags=["sessions"])
+api_router.include_router(session_events.router, prefix="/sessions", tags=["sessions"])
 api_router.include_router(
     knowledge.router,
     prefix="/channels/{channel_id}/knowledge",

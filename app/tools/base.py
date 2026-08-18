@@ -1,5 +1,11 @@
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from contextvars import ContextVar
+from typing import Any, Dict, Optional
+
+_tool_context: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
+    "kirana_tool_context",
+    default=None,
+)
 
 
 class BaseTool(ABC):
@@ -13,6 +19,17 @@ class BaseTool(ABC):
 
     # Default: tool is user-facing (not internal)
     internal: bool = False
+
+    # Per-request context injected by ChatService before execution
+    # (e.g. {"session_id": ..., "channel_id": ...}). ContextVar keeps
+    # singleton tool instances isolated across concurrent request tasks.
+    @property
+    def context(self) -> Dict[str, Any]:
+        return _tool_context.get() or {}
+
+    @context.setter
+    def context(self, value: Dict[str, Any]) -> None:
+        _tool_context.set(value)
 
     @property
     @abstractmethod
@@ -39,6 +56,6 @@ class BaseTool(ABC):
             "function": {
                 "name": self.name,
                 "description": self.description,
-                "parameters": self.parameters
-            }
+                "parameters": self.parameters,
+            },
         }

@@ -7,6 +7,7 @@ echo "[Entrypoint] Starting Kirana..."
 echo "[Entrypoint] Running database migrations..."
 alembic upgrade head
 
-# Start the application
-echo "[Entrypoint] Starting uvicorn..."
-exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+# Realtime session events and Telegram long-polling are process-local, so Kirana
+# must run as one application worker until the event bus moves to Redis/pubsub.
+echo "[Entrypoint] Starting uvicorn (single worker)..."
+exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1

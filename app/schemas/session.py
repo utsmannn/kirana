@@ -18,6 +18,7 @@ class SessionCreate(SessionBase):
 
 class SessionUpdate(SessionBase):
     is_active: Optional[bool] = None
+    mode: Optional[str] = Field(default=None, pattern="^(ai|human)$")
 
 
 class SessionResponse(BaseModel):
@@ -28,6 +29,7 @@ class SessionResponse(BaseModel):
     message_count: int
     total_tokens: int
     is_active: bool
+    mode: str = "ai"
     created_at: datetime
     last_activity: datetime
 
@@ -57,3 +59,16 @@ class SessionMessagesResponse(BaseModel):
     total: int
     page: int
     limit: int
+
+
+class MessageInject(BaseModel):
+    """External message injection (e.g. human agent reply via MCP bridge)."""
+    role: str = Field(pattern="^(assistant|agent|user)$")
+    content: str = Field(min_length=1)
+    model: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class MessageInjectResponse(MessageResponse):
+    session_id: uuid.UUID
+    mode: str

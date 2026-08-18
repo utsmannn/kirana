@@ -4,11 +4,20 @@ import json
 import logging
 import re
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException, status
-from openai import APIConnectionError, APIError, APITimeoutError, AuthenticationError, BadRequestError, RateLimitError, AsyncOpenAI
+from openai import (
+    APIConnectionError,
+    APIError,
+    APITimeoutError,
+    AsyncOpenAI,
+    AuthenticationError,
+    BadRequestError,
+    RateLimitError,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,6 +38,120 @@ from app.tools.registry import tool_registry
 
 logger = logging.getLogger(__name__)
 
+# --- DSML fallback ---------------------------------------------------------
+# Some OpenAI-compatible providers (e.g. deepseek via proxy) do not return
+# structured `tool_calls`; they emit tool invocations as raw markup inside the
+# content. We parse that markup so tools still execute and the markup never
+# leaks to end users.
+DSML_STARTS = ("<｜DSML｜", "<｜｜DSML｜｜")
+DSML_PREFIX_RE = re.compile(r"<｜{1,2}DSML")
+DSML_TOOL_CALLS_RE = re.compile(
+    r"<｜{1,2}DSML｜{1,2}(?:tool_calls|function_calls)>"
+    r"(.*?)"
+    r"</｜{1,2}DSML｜{1,2}(?:tool_calls|function_calls)>",
+    re.DOTALL,
+)
+DSML_INVOKE_RE = re.compile(
+    r'<｜{1,2}DSML｜{1,2}invoke name="([^"]+)">'
+    r"(.*?)"
+    r"</｜{1,2}DSML｜{1,2}invoke>",
+    re.DOTALL,
+)
+DSML_PARAM_RE = re.compile(
+    r'<｜{1,2}DSML｜{1,2}parameter name="([^"]+)"[^>]*>'
+    r"(.*?)"
+    r"</｜{1,2}DSML｜{1,2}parameter>",
+    re.DOTALL,
+)
+DSML_ANY_RE = re.compile(r"</?｜{1,2}DSML｜{1,2}[^>]*>", re.DOTALL)
+
+
+def parse_dsml_tool_calls(text: str) -> Tuple[str, List[Dict[str, Any]]]:
+    """Extract single- or double-separator DSML tool invocations.
+
+    DeepSeek variants emit either ``tool_calls`` or ``function_calls`` wrappers.
+    Returns OpenAI-shaped calls while removing all DSML from visible content.
+    """
+    calls: List[Dict[str, Any]] = []
+    call_index = 0
+    for match in DSML_TOOL_CALLS_RE.finditer(text):
+        for invoke in DSML_INVOKE_RE.finditer(match.group(1)):
+            name = invoke.group(1).strip()
+            args: Dict[str, Any] = {}
+            for param in DSML_PARAM_RE.finditer(invoke.group(2)):
+                raw = param.group(2).strip()
+                try:
+                    args[param.group(1)] = json.loads(raw)
+                except json.JSONDecodeError:
+                    args[param.group(1)] = raw
+            calls.append(
+                {
+                    "id": f"dsml_{call_index}_{name}",
+                    "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(args)},
+                }
+            )
+            call_index += 1
+
+    if not calls:
+        # Fail closed on malformed or partial markup: keep only text before the
+        # first DSML marker so raw tool syntax and arguments never reach users.
+        marker = DSML_PREFIX_RE.search(text)
+        return (text[: marker.start()].strip(), []) if marker else (text, [])
+
+    clean = DSML_TOOL_CALLS_RE.sub("", text)
+    residual = DSML_PREFIX_RE.search(clean)
+    if residual:
+        clean = clean[: residual.start()]
+    else:
+        clean = DSML_ANY_RE.sub("", clean)
+    return clean.strip(), calls
+
+
+def _dsml_marker_prefix_len(text: str) -> int:
+    """Return the longest supported DSML marker prefix ending ``text``."""
+    longest = 0
+    for marker in DSML_STARTS:
+        for size in range(min(len(marker) - 1, len(text)), 0, -1):
+            if text.endswith(marker[:size]):
+                longest = max(longest, size)
+                break
+    return longest
+
+
+class DsmlStreamFilter:
+    """Streaming guard: yields clean text, holds back DSML markup even when the
+    marker is split across chunks."""
+
+    def __init__(self):
+        self.started = False
+        self.pending = ""
+
+    def feed(self, chunk: str) -> str:
+        if self.started:
+            self.pending += chunk
+            return ""
+        self.pending += chunk
+        marker_indexes = [
+            self.pending.find(marker)
+            for marker in DSML_STARTS
+            if self.pending.find(marker) != -1
+        ]
+        if marker_indexes:
+            idx = min(marker_indexes)
+            self.started = True
+            out = self.pending[:idx]
+            self.pending = self.pending[idx:]
+            return out
+        keep = _dsml_marker_prefix_len(self.pending)
+        out = self.pending[: len(self.pending) - keep] if keep else self.pending
+        self.pending = self.pending[len(self.pending) - keep:] if keep else ""
+        return out
+
+    def raw(self) -> str:
+        return self.pending
+
+
 CHAT_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 CHAT_IMAGE_MIME_TYPES = {
     "image/jpeg",
@@ -38,10 +161,16 @@ CHAT_IMAGE_MIME_TYPES = {
     "image/bmp",
 }
 DATA_IMAGE_RE = re.compile(r"^data:(image/[a-zA-Z0-9.+-]+);base64,(.+)$", re.DOTALL)
+HUMAN_HANDOFF_MESSAGE = (
+    "Pertanyaanmu sudah diteruskan ke tim kami. "
+    "Agent manusia akan segera membalas."
+)
 
 
 class ChatService:
     def __init__(self, db: AsyncSession):
+        self._current_session_id = None
+        self._current_channel_id = None
         self.db = db
 
     async def load_channel_mcp_tools(self, channel_id: str) -> List[McpToolAdapter]:
@@ -315,7 +444,18 @@ Always respond in the same language the user used in their query.
     ) -> List[Dict[str, Any]]:
         """Execute tool calls and return results."""
         results = []
-        tools_by_name = {tool.name: tool for tool in (available_tools or tool_registry.list_tools())}
+        tools = available_tools or tool_registry.list_tools()
+        tools_by_name = {tool.name: tool for tool in tools}
+        tool_context = {
+            "session_id": (
+                str(self._current_session_id) if self._current_session_id else None
+            ),
+            "channel_id": (
+                str(self._current_channel_id) if self._current_channel_id else None
+            ),
+        }
+        for tool in tools:
+            tool.context = tool_context
 
         for tool_call in tool_calls:
             tool_call_id = tool_call.get("id")
@@ -568,6 +708,21 @@ Always respond in the same language the user used in their query.
             )
             session = result.scalar_one_or_none()
             if session:
+                session_visitor_id = str(
+                    (session.extra_metadata or {}).get("visitor_id") or ""
+                )
+                if (
+                    request.channel_id
+                    and session.channel_id != request.channel_id
+                ) or (
+                    request.visitor_id
+                    and session_visitor_id != request.visitor_id
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Session does not belong to this visitor",
+                    )
+
                 # Load channel from session if not already loaded
                 if not channel and session.channel_id:
                     c_result = await self.db.execute(
@@ -601,14 +756,23 @@ Always respond in the same language the user used in their query.
 
             if save_history:
                 # Create new session for this embed chat visitor
-                # Name format: "Embed - {visitor_id}" for easy identification
-                session_name = f"Embed - {request.visitor_id[:8]}"
+                session_name = (
+                    request.visitor_name or f"Embed - {request.visitor_id[:8]}"
+                )
                 session = Session(
                     name=session_name,
                     channel_id=channel.id,
+                    extra_metadata={
+                        "visitor_id": request.visitor_id,
+                        "visitor_name": request.visitor_name,
+                        "visitor_email": request.visitor_email,
+                    },
                 )
                 self.db.add(session)
-                await self.db.flush()  # Get the ID without committing
+                # Commit (not just flush) so parallel connections — e.g. the
+                # Telegram bridge resolving this session from a tool call —
+                # can see the row before the conversation is saved.
+                await self.db.commit()
                 logger.info("[SESSION] Created new session for embed visitor: %s (channel: %s)", request.visitor_id[:8], channel.name)
 
         # Build system prompt with channel config
@@ -727,6 +891,8 @@ Always respond in the same language the user used in their query.
                 ", ".join(tool.name for tool in available_tools),
             )
 
+        self._current_session_id = session.id if session else None
+        self._current_channel_id = channel.id if channel else None
         return completion_kwargs, session, model, messages, client, available_tools
 
     async def _save_conversation(
@@ -769,9 +935,67 @@ Always respond in the same language the user used in their query.
 
             await self.db.commit()
             logger.info("[SAVE] Commit successful")
+
+            # Publish session events (realtime subscribers + webhook)
+            from app.services import event_bus
+            await event_bus.publish(
+                "message.user",
+                session.id,
+                session.channel_id,
+                {
+                    "message_id": str(db_user_msg.id),
+                    "role": db_user_msg.role,
+                    "content": db_user_msg.content,
+                },
+            )
+            await event_bus.publish(
+                "message.assistant",
+                session.id,
+                session.channel_id,
+                {
+                    "message_id": str(db_assistant_msg.id),
+                    "role": "assistant",
+                    "content": assistant_content,
+                    "model": model,
+                },
+            )
         except Exception as e:
             logger.exception("[SAVE] Error saving conversation: %s", e)
             raise
+
+    async def _save_user_message_human_mode(
+        self,
+        session: Session,
+        user_msg: Any,
+    ) -> ConversationLog:
+        """Human mode: log the user message only — no LLM call."""
+        log = ConversationLog(
+            session_id=session.id,
+            client_id=session.client_id,
+            role=user_msg.role,
+            content=self._serialize_content_for_storage(user_msg.content),
+            model="human_mode",
+            tokens_used=0,
+        )
+        self.db.add(log)
+        session.message_count += 1
+        session.last_activity = datetime.now(timezone.utc)
+        await self.db.commit()
+        await self.db.refresh(log)
+
+        from app.services import event_bus
+        await event_bus.publish(
+            "message.user",
+            session.id,
+            session.channel_id,
+            {
+                "message_id": str(log.id),
+                "role": log.role,
+                "content": log.content,
+                "queued_for_human": True,
+            },
+        )
+        return log
 
     async def create_chat_completion(
         self,
@@ -779,6 +1003,35 @@ Always respond in the same language the user used in their query.
     ) -> ChatCompletionResponse:
         """Create a chat completion with tool support."""
         completion_kwargs, session, model, messages, client, available_tools = await self._prepare_completion(request)
+
+        # Human mode: a human agent owns this conversation — log only, no LLM.
+        if session and session.mode == "human":
+            await self._save_user_message_human_mode(session, request.messages[-1])
+            return ChatCompletionResponse(
+                id=f"human-{uuid.uuid4().hex[:12]}",
+                created=int(time.time()),
+                model="human_mode",
+                choices=[
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": HUMAN_HANDOFF_MESSAGE,
+                        },
+                        "finish_reason": "human_handoff",
+                    }
+                ],
+                usage={
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+                session={
+                    "id": str(session.id),
+                    "mode": "human",
+                    "queued_for_human": True,
+                },
+            )
 
         start_time = time.monotonic()
         try:
@@ -789,25 +1042,58 @@ Always respond in the same language the user used in their query.
 
         message = response.choices[0].message
         content = message.content or ""
+        dsml_clean, dsml_calls = parse_dsml_tool_calls(content)
+        if dsml_calls:
+            logger.info(
+                "[TOOL] Parsed %d DSML tool calls from content",
+                len(dsml_calls),
+            )
+        if dsml_clean != content:
+            content = dsml_clean
         usage = response.usage
 
         # Check if LLM wants to use tools
-        if message.tool_calls:
-            logger.info("[TOOL] LLM requested %d tool calls", len(message.tool_calls))
+        if message.tool_calls or dsml_calls:
+            logger.info(
+                "[TOOL] LLM requested %d tool calls",
+                len(message.tool_calls or dsml_calls),
+            )
 
             # Convert tool_calls to dicts for execute and for messages
-            tool_calls_dicts = [tc.model_dump() for tc in message.tool_calls]
+            if message.tool_calls:
+                tool_calls_dicts = [tc.model_dump() for tc in message.tool_calls]
+            else:
+                tool_calls_dicts = dsml_calls
 
             # Execute tools
             tool_results = await self._execute_tool_calls(tool_calls_dicts, available_tools)
 
             # Build new messages with tool calls and results
-            messages.append({
-                "role": "assistant",
-                "content": content,
-                "tool_calls": tool_calls_dicts,
-            })
-            messages.extend(tool_results)
+            if message.tool_calls:
+                messages.append({
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": tool_calls_dicts,
+                })
+                messages.extend(tool_results)
+            else:
+                # Provider emitted DSML markup: it does not understand OpenAI
+                # tool roles, so feed results back as a plain user message.
+                messages.append({"role": "assistant", "content": content})
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "Hasil pemanggilan tool "
+                        "(JSON, gunakan untuk menjawab):\n"
+                    )
+                    + json.dumps(
+                        [
+                            {"name": r["name"], "result": r["content"]}
+                            for r in tool_results
+                        ],
+                        ensure_ascii=False,
+                    ),
+                })
 
             # Re-call LLM with tool results
             completion_kwargs["messages"] = messages
@@ -820,7 +1106,14 @@ Always respond in the same language the user used in their query.
                 final_response = await client.chat.completions.create(**completion_kwargs)
             except Exception as e:
                 self._raise_provider_error(e, model)
-            content = final_response.choices[0].message.content or ""
+            content, leftover_calls = parse_dsml_tool_calls(
+                final_response.choices[0].message.content or ""
+            )
+            if leftover_calls:
+                logger.warning(
+                    "[TOOL] DSML tool calls leaked into final answer; discarded: %s",
+                    [c["function"]["name"] for c in leftover_calls],
+                )
             usage = final_response.usage
             latency_ms = int((time.monotonic() - start_time) * 1000)
 
@@ -868,6 +1161,34 @@ Always respond in the same language the user used in their query.
         completion_kwargs, session, model, messages, client, available_tools = await self._prepare_completion(request)
         completion_kwargs["stream"] = True
 
+        # Announce the session before provider work. WebSocket adapters can attach
+        # the event subscription now, so a fast Telegram reply is queued instead
+        # of being lost while the AI stream is still running.
+        if session:
+            yield f"data: {json.dumps({'session_id': str(session.id)})}\n\n"
+
+        # Human mode: a human agent owns this conversation — log only, no LLM.
+        if session and session.mode == "human":
+            await self._save_user_message_human_mode(session, request.messages[-1])
+            handoff_chunk = {
+                "id": f"human-{uuid.uuid4().hex[:12]}",
+                "object": "chat.completion.chunk",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": HUMAN_HANDOFF_MESSAGE,
+                        },
+                        "finish_reason": "human_handoff",
+                    }
+                ],
+            }
+            yield f"data: {json.dumps(handoff_chunk)}\n\n"
+            yield f"data: {json.dumps({'type': 'queued_for_human'})}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+
         start_time = time.monotonic()
 
         try:
@@ -878,6 +1199,7 @@ Always respond in the same language the user used in their query.
         full_content = ""
         tool_calls_accum: Dict[int, Dict[str, Any]] = {}
         has_tool_calls = False
+        dsml_filter = DsmlStreamFilter()
 
         async for chunk in response:
             delta = chunk.choices[0].delta
@@ -910,12 +1232,32 @@ Always respond in the same language the user used in their query.
                     yield f"data: {json.dumps(event)}\n\n"
                 continue
 
-            # Regular content - yield to client immediately
+            # Regular content - filter DSML markup, yield clean text
             chunk_content = delta.content or ""
             if chunk_content:
                 full_content += chunk_content
-                yield f"data: {json.dumps(chunk.model_dump(exclude_none=True))}\n\n"
+                clean_out = dsml_filter.feed(chunk_content)
+                if clean_out:
+                    event = {
+                        "id": getattr(chunk, "id", None) or "chatcmpl-dsml",
+                        "object": "chat.completion.chunk",
+                        "choices": [{"index": 0, "delta": {"content": clean_out}}],
+                    }
+                    yield f"data: {json.dumps(event)}\n\n"
             # Skip chunks with only reasoning_content and no actual content
+
+        # DSML fallback: provider emitted tool calls as raw markup in content
+        dsml_clean, dsml_calls = parse_dsml_tool_calls(full_content)
+        via_dsml = bool(dsml_calls)
+        if via_dsml and not has_tool_calls:
+            logger.info(
+                "[TOOL STREAM] Parsed %d DSML tool calls from content",
+                len(dsml_calls),
+            )
+            has_tool_calls = True
+            tool_calls_accum = dict(enumerate(dsml_calls))
+        if dsml_clean != full_content:
+            full_content = dsml_clean
 
         # If LLM requested tool calls, execute and stream final answer
         if has_tool_calls:
@@ -950,12 +1292,31 @@ Always respond in the same language the user used in their query.
                 yield f"data: {json.dumps(event)}\n\n"
 
             # Build messages for second call
-            messages.append({
-                "role": "assistant",
-                "content": full_content,
-                "tool_calls": tool_calls_list
-            })
-            messages.extend(tool_results)
+            if via_dsml:
+                # Provider does not understand OpenAI tool roles; feed results
+                # back as a plain user message instead.
+                messages.append({"role": "assistant", "content": full_content})
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "Hasil pemanggilan tool "
+                        "(JSON, gunakan untuk menjawab):\n"
+                    )
+                    + json.dumps(
+                        [
+                            {"name": r["name"], "result": r["content"]}
+                            for r in tool_results
+                        ],
+                        ensure_ascii=False,
+                    ),
+                })
+            else:
+                messages.append({
+                    "role": "assistant",
+                    "content": full_content,
+                    "tool_calls": tool_calls_list
+                })
+                messages.extend(tool_results)
 
             # Stream the final answer (no tools to avoid loop)
             completion_kwargs["messages"] = messages
@@ -968,15 +1329,28 @@ Always respond in the same language the user used in their query.
             except Exception as e:
                 self._raise_provider_error(e, model)
 
+            dsml_filter2 = DsmlStreamFilter()
             async for chunk in final_response:
                 chunk_content = chunk.choices[0].delta.content or ""
                 if chunk_content:
                     full_content += chunk_content
-                    yield f"data: {json.dumps(chunk.model_dump(exclude_none=True))}\n\n"
-
-        # Send session_id before [DONE] so clients that stop on [DONE] can still receive it.
-        if session:
-            yield f"data: {json.dumps({'session_id': str(session.id)})}\n\n"
+                    clean_out = dsml_filter2.feed(chunk_content)
+                    if clean_out:
+                        event = {
+                            "id": getattr(chunk, "id", None) or "chatcmpl-dsml",
+                            "object": "chat.completion.chunk",
+                            "choices": [{"index": 0, "delta": {"content": clean_out}}],
+                        }
+                        yield f"data: {json.dumps(event)}\n\n"
+            final_clean, leftover_calls = parse_dsml_tool_calls(full_content)
+            if leftover_calls:
+                logger.warning(
+                    "[TOOL STREAM] DSML tool calls leaked into final answer; "
+                    "discarded: %s",
+                    [c["function"]["name"] for c in leftover_calls],
+                )
+            if final_clean != full_content:
+                full_content = final_clean
 
         yield "data: [DONE]\n\n"
 

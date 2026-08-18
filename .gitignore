@@ -43,9 +43,10 @@ web/node_modules/
 web/.svelte-kit/
 web/build/
 
-# Docker volumes
+# Docker volumes and runtime uploads
 postgres_data/
 redis_data/
+uploads/
 
 # Database dumps
 *.dump

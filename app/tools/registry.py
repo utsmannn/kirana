@@ -1,5 +1,6 @@
 from typing import Any, Dict, List
 
+from app.config import settings
 from app.tools.base import BaseTool
 from app.tools.datetime_tool import DateTimeTool
 from app.tools.image_analyzer_tool import ImageAnalyzerTool
@@ -13,6 +14,13 @@ class ToolRegistry:
     def _register_defaults(self):
         self.register(DateTimeTool())
         self.register(ImageAnalyzerTool())
+
+        # Telegram human-agent bridge (optional — only when configured)
+        if settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID:
+            from app.tools.telegram_tools import EscalateToHumanTool, ReportToStaffTool
+
+            self.register(EscalateToHumanTool())
+            self.register(ReportToStaffTool())
 
     def register(self, tool: BaseTool):
         self._tools[tool.name] = tool

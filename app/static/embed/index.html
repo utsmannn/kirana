@@ -260,9 +260,29 @@
         let reconnectAttempts = 0;
         const MAX_RECONNECT = 5;
 
+        // Stable identity from parent page (?visitor=), else random
+        const urlVisitor = urlParams.get('visitor');
+        const urlVisitorName = urlParams.get('name') || '';
+        const urlVisitorEmail = urlParams.get('email') || '';
+
         // Generate or get unique visitor ID for this embed/channel
         function getVisitorId() {
             let visitorId = localStorage.getItem(VISITOR_KEY);
+            if (urlVisitor) {
+                if (visitorId !== urlVisitor) {
+                    // A different authenticated user opened this channel in the
+                    // same browser. Never reuse the previous user's local chat.
+                    localStorage.removeItem(HISTORY_KEY);
+                    localStorage.removeItem(STREAM_KEY);
+                    localStorage.removeItem(SESSION_KEY);
+                    messages = [];
+                    currentStreamId = null;
+                    streaming = false;
+                    visitorId = urlVisitor;
+                    localStorage.setItem(VISITOR_KEY, visitorId);
+                }
+                return visitorId;
+            }
             if (!visitorId) {
                 // Generate random ID: 8 chars hex
                 visitorId = Math.random().toString(36).substring(2, 10) + Date.now().toString(36).substring(-4);
@@ -380,6 +400,16 @@
                 render();
                 console.log('[WS] Connected');
 
+                // Restore interception for human-agent replies after reconnect.
+                const existingSessionId = getSessionId();
+                if (existingSessionId) {
+                    ws.send(JSON.stringify({
+                        action: 'subscribe',
+                        session_id: existingSessionId,
+                        visitor_id: getVisitorId()
+                    }));
+                }
+
                 // Check for active stream to resume
                 checkAndResumeStream();
             };
@@ -417,9 +447,10 @@
                 case 'stream_start':
                     currentStreamId = msg.stream_id;
                     streaming = true;
-                    // Add empty assistant message if not exists
-                    if (messages.length === 0 || messages[messages.length - 1].role !== 'assistant') {
-                        messages.push({ role: 'assistant', content: '' });
+                    // Human-agent injections are always a new bubble, even if
+                    // the previous message was also from an assistant.
+                    if (msg.from_agent || messages.length === 0 || messages[messages.length - 1].role !== 'assistant') {
+                        messages.push({ role: 'assistant', content: '', fromAgent: Boolean(msg.from_agent) });
                     }
                     // Save stream state for resume
                     saveStreamState();
@@ -445,6 +476,19 @@
                         console.log('[WS] Session saved:', msg.session_id);
                     }
                     render();
+                    break;
+
+                case 'history':
+                    if (Array.isArray(msg.messages)) {
+                        messages = msg.messages.map((item) => ({
+                            id: item.id,
+                            role: item.role,
+                            content: item.content || '',
+                            fromAgent: Boolean(item.fromAgent)
+                        }));
+                        saveHistory();
+                        render();
+                    }
                     break;
 
                 case 'error':
@@ -477,7 +521,9 @@
                 messages: messages,  // All messages including the new user message
                 stream: true,
                 channel_id: channelId,
-                visitor_id: getVisitorId()
+                visitor_id: getVisitorId(),
+                visitor_name: urlVisitorName,
+                visitor_email: urlVisitorEmail
             };
 
             // Include session_id if we have one (for conversation continuity)
@@ -700,6 +746,9 @@
 
                 // Load custom CSS
                 loadCustomCss();
+
+                // Sync authenticated identity before loading channel-local state.
+                getVisitorId();
 
                 // Load history
                 if (config.save_history) {

@@ -1,5 +1,5 @@
 import uuid
-from typing import Optional
+from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import desc, func, select
@@ -10,6 +10,8 @@ from app.models.channel import Channel
 from app.models.conversation import ConversationLog
 from app.models.session import Session
 from app.schemas.session import (
+    MessageInject,
+    MessageInjectResponse,
     SessionCreate,
     SessionListResponse,
     SessionMessagesResponse,
@@ -115,11 +117,23 @@ async def update_session(
     if "metadata" in update_data:
         update_data["extra_metadata"] = update_data.pop("metadata")
 
+    old_mode = session.mode
+
     for field, value in update_data.items():
         setattr(session, field, value)
 
     await db.commit()
     await db.refresh(session)
+
+    if session.mode != old_mode:
+        from app.services import event_bus
+        await event_bus.publish(
+            "session.mode_changed",
+            session.id,
+            session.channel_id,
+            {"mode": session.mode, "previous_mode": old_mode},
+        )
+
     return session
 
 
@@ -178,4 +192,70 @@ async def get_session_messages(
         "total": total,
         "page": page,
         "limit": limit,
+    }
+
+
+@router.post(
+    "/{session_id}/messages",
+    response_model=MessageInjectResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def inject_message(
+    session_id: uuid.UUID,
+    message_in: MessageInject,
+    _auth: Annotated[tuple, Depends(deps.verify_api_key_or_admin_token)],
+    db: Annotated[AsyncSession, Depends(deps.get_db_session)],
+):
+    """Inject a message into a session as an external agent (e.g. human agent
+    replying via the Telegram bridge). Writes to the conversation log and
+    publishes a message.agent event."""
+    from datetime import datetime, timezone
+
+    result = await db.execute(
+        select(Session).where(Session.id == session_id)
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if not session.is_active:
+        raise HTTPException(status_code=400, detail="Session is not active")
+
+    role = "assistant" if message_in.role == "agent" else message_in.role
+    log = ConversationLog(
+        session_id=session.id,
+        client_id=session.client_id,
+        role=role,
+        content=message_in.content,
+        model=message_in.model or "human_agent",
+        tokens_used=0,
+    )
+    db.add(log)
+    session.message_count += 1
+    session.last_activity = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(log)
+    await db.refresh(session)
+
+    from app.services import event_bus
+    await event_bus.publish(
+        "message.agent" if role == "assistant" else "message.user",
+        session.id,
+        session.channel_id,
+        {
+            "message_id": str(log.id),
+            "role": role,
+            "content": message_in.content,
+            "injected": True,
+            "metadata": message_in.metadata or {},
+        },
+    )
+
+    return {
+        "id": log.id,
+        "session_id": session.id,
+        "role": role,
+        "content": log.content,
+        "created_at": log.created_at,
+        "mode": session.mode,
     }

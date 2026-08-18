@@ -1,10 +1,20 @@
+import asyncio
 import json
 import logging
 import time
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
@@ -14,6 +24,7 @@ from app.api import deps
 from app.config import settings
 from app.db.session import get_db
 from app.schemas.chat import ChatCompletionRequest
+from app.services import event_bus
 from app.services.chat_service import ChatService
 from app.services.stream_buffer import StreamBuffer
 
@@ -297,6 +308,7 @@ async def chat_websocket(
 
     # Verify authentication
     is_embed = False
+    authorized_channel_id: uuid.UUID | None = None
     if token and token == settings.KIRANA_API_KEY:
         pass  # Valid API key
     elif token and verify_admin_token(token):
@@ -312,6 +324,7 @@ async def chat_websocket(
                 await websocket.close(code=4001, reason="Invalid embed token")
                 return
             is_embed = True
+            authorized_channel_id = channel.id
             break
     elif channel_id:
         # Verify public embed
@@ -337,6 +350,7 @@ async def chat_websocket(
                 await websocket.close(code=4001, reason="This embed requires a token")
                 return
             is_embed = True
+            authorized_channel_id = channel.id
             break
     else:
         await websocket.close(code=4001, reason="Authentication required")
@@ -348,9 +362,47 @@ async def chat_websocket(
     stream_buffer = StreamBuffer()
     current_stream_id: str | None = None
 
+    # Session event interception: while the socket sits idle waiting for the
+    # user, forward human-agent replies injected via the API (e.g. the
+    # Telegram bridge) to this socket as a regular chunk stream — no extra
+    # socket needed on the widget side.
+    events_queue = None
+    events_session_id: str | None = None
+
     try:
         while True:
-            raw = await websocket.receive_text()
+            recv_task = asyncio.create_task(websocket.receive_text())
+            event_task = (
+                asyncio.create_task(events_queue.get())
+                if events_queue
+                else None
+            )
+            wait_set = {recv_task, event_task} if event_task else {recv_task}
+            done, _ = await asyncio.wait(
+                wait_set,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            event_ready = event_task is not None and event_task in done
+            receive_ready = recv_task in done
+
+            # Both tasks may complete in the same event-loop turn. Process both;
+            # discarding an already-completed receive would lose a user message.
+            if event_ready and event_task is not None:
+                await _forward_agent_event(
+                    websocket,
+                    events_session_id,
+                    event_task.result(),
+                )
+
+            if not receive_ready:
+                recv_task.cancel()
+                await asyncio.gather(recv_task, return_exceptions=True)
+                continue
+
+            if event_task is not None and not event_ready:
+                event_task.cancel()
+                await asyncio.gather(event_task, return_exceptions=True)
+            raw = recv_task.result()
 
             try:
                 msg = json.loads(raw)
@@ -360,7 +412,109 @@ async def chat_websocket(
 
             action = msg.get("action")
 
-            if action == "resume":
+            if action == "subscribe":
+                requested_session_id = msg.get("session_id")
+                try:
+                    requested_uuid = uuid.UUID(str(requested_session_id))
+                except (TypeError, ValueError):
+                    await websocket.send_json(
+                        {"type": "error", "message": "Invalid session_id"}
+                    )
+                    continue
+
+                from app.db.session import async_session
+                from app.models.conversation import ConversationLog
+                from app.models.session import Session
+
+                async with async_session() as db:
+                    result = await db.execute(
+                        select(Session).where(Session.id == requested_uuid)
+                    )
+                    requested_session = result.scalar_one_or_none()
+
+                visitor_id = str(msg.get("visitor_id") or "")
+                session_visitor_id = str(
+                    (requested_session.extra_metadata or {}).get("visitor_id")
+                    if requested_session else ""
+                )
+                if not requested_session or (
+                    is_embed
+                    and (
+                        requested_session.channel_id != authorized_channel_id
+                        or not visitor_id
+                        or visitor_id != session_visitor_id
+                    )
+                ):
+                    await websocket.send_json(
+                        {"type": "error", "message": "Session not found"}
+                    )
+                    continue
+
+                requested_id = str(requested_session.id)
+                if events_queue is None or events_session_id != requested_id:
+                    if events_queue is not None and events_session_id:
+                        event_bus.unsubscribe(events_session_id, events_queue)
+                    events_session_id = requested_id
+                    events_queue = event_bus.subscribe(events_session_id)
+
+                # Subscribe before reading history. Then remove only queued agent
+                # events already represented by that snapshot; events committed
+                # after the query stay queued and cannot fall into a reconnect gap.
+                async with async_session() as db:
+                    result = await db.execute(
+                        select(ConversationLog)
+                        .where(ConversationLog.session_id == requested_session.id)
+                        .order_by(ConversationLog.created_at.desc())
+                        .limit(200)
+                    )
+                    history_logs = list(reversed(result.scalars().all()))
+
+                history_ids = {str(log.id) for log in history_logs}
+                buffered_events = []
+                while events_queue is not None:
+                    try:
+                        event = events_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    event_message_id = str(
+                        (event.get("data") or {}).get("message_id") or ""
+                    )
+                    if (
+                        event.get("type") == "message.agent"
+                        and event_message_id in history_ids
+                    ):
+                        continue
+                    buffered_events.append(event)
+                for event in buffered_events:
+                    events_queue.put_nowait(event)
+
+                await websocket.send_json(
+                    {
+                        "type": "subscribed",
+                        "session_id": events_session_id,
+                    }
+                )
+                await websocket.send_json(
+                    {
+                        "type": "history",
+                        "session_id": events_session_id,
+                        "messages": [
+                            {
+                                "id": str(log.id),
+                                "role": log.role,
+                                "content": log.content,
+                                "fromAgent": log.model == "human_agent",
+                            }
+                            for log in history_logs
+                        ],
+                    }
+                )
+                logger.info(
+                    "[WS] Restored session event interception for %s",
+                    events_session_id,
+                )
+
+            elif action == "resume":
                 # Resume an existing stream
                 stream_id = msg.get("stream_id")
                 if not stream_id:
@@ -414,17 +568,42 @@ async def chat_websocket(
                                 try:
                                     payload = json.loads(sse_chunk[6:].strip())
 
-                                    # Check for session_id event
+                                    # Attach interception as soon as ChatService
+                                    # announces the session. Events arriving while
+                                    # the AI stream is active stay queued here.
                                     if "session_id" in payload:
-                                        session_id = payload["session_id"]
+                                        session_id = str(payload["session_id"])
+                                        if session_id != events_session_id:
+                                            if (
+                                                events_queue is not None
+                                                and events_session_id
+                                            ):
+                                                event_bus.unsubscribe(
+                                                    events_session_id,
+                                                    events_queue,
+                                                )
+                                            events_queue = event_bus.subscribe(
+                                                session_id
+                                            )
+                                            events_session_id = session_id
+                                            logger.info(
+                                                "[WS] Intercepting session "
+                                                "events for %s",
+                                                session_id,
+                                            )
                                         continue
 
-                                    # Forward tool lifecycle events so websocket clients can inspect tool usage.
+                                    # Forward tool lifecycle events so WebSocket
+                                    # clients can inspect tool usage.
                                     if payload.get("type", "").startswith("tool_call_"):
                                         try:
                                             await websocket.send_json(payload)
                                         except (WebSocketDisconnect, RuntimeError):
-                                            logger.info("[WS] Client disconnected mid-tool-event, buffering %s", stream_id)
+                                            logger.info(
+                                                "[WS] Client disconnected "
+                                                "mid-tool-event, buffering %s",
+                                                stream_id,
+                                            )
                                         continue
 
                                     # Regular content chunk
@@ -468,6 +647,15 @@ async def chat_websocket(
 
                 current_stream_id = None
 
+                # Start (or switch) intercepting events for this session so
+                # injected agent replies reach this widget.
+                if session_id and session_id != events_session_id:
+                    if events_queue is not None:
+                        event_bus.unsubscribe(events_session_id, events_queue)
+                    events_queue = event_bus.subscribe(session_id)
+                    events_session_id = session_id
+                    logger.info("[WS] Intercepting session events for %s", session_id)
+
             else:
                 await websocket.send_json({"type": "error", "message": f"Unknown action: {action}"})
 
@@ -479,3 +667,32 @@ async def chat_websocket(
             await websocket.close(code=1011)
         except Exception:
             pass
+    finally:
+        if events_queue is not None and events_session_id:
+            event_bus.unsubscribe(events_session_id, events_queue)
+
+
+async def _forward_agent_event(
+    websocket: WebSocket,
+    session_id: str | None,
+    event: dict,
+) -> None:
+    """Render an injected human-agent reply as a normal chunk stream."""
+    if not event or not session_id or event.get("session_id") != session_id:
+        return
+    if event.get("type") != "message.agent":
+        return
+    content = (event.get("data") or {}).get("content")
+    if not content:
+        return
+    try:
+        await websocket.send_json({
+            "type": "stream_start",
+            "stream_id": str(uuid.uuid4()),
+            "from_agent": True,
+        })
+        await websocket.send_json({"type": "chunk", "content": content})
+        await websocket.send_json({"type": "stream_end", "session_id": session_id})
+        logger.info("[WS] Forwarded injected agent reply for session %s", session_id)
+    except Exception:
+        pass  # socket died; the message is already persisted in the session log

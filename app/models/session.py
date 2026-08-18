@@ -23,6 +23,8 @@ class Session(Base):
     message_count = Column(Integer, default=0)
     total_tokens = Column(Integer, default=0)
     is_active = Column(Boolean, default=True, index=True)
+    # ai = AI agent auto-replies; human = human agent owns the conversation
+    mode = Column(String(20), nullable=False, default="ai", server_default="ai")
     created_at = Column(DateTime(timezone=True), default=_utcnow)
     updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
     last_activity = Column(DateTime(timezone=True), default=_utcnow, index=True)
